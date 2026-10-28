@@ -97,4 +97,11 @@ def monte_carlo_price(S: float, K: float, T: float, r: float, sigma: float, opti
 
     return float(discounted_price)
 
+
+
+if __name__ == "__main__":
+    print("BS Call:", black_scholes_price_only(100, 100, 1.0, 0.05, 0.20, "call"))
+    print("MC Call:", monte_carlo_price(100, 100, 1.0, 0.05, 0.20, "call", 50000))
+
+    
         
