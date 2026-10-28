@@ -1,0 +1,3 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}\\1-python-quant-engine\\venv\\Scripts\\python.exe"
+}
