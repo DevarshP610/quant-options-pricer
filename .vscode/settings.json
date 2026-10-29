@@ -3,5 +3,6 @@
     "python.analysis.extraPaths": [
         "${workspaceFolder}\\1-python-quant-engine\\venv\\Lib\\site-packages"
     ],
-    "python.terminal.activateEnvironment": true
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.cwd": "${workspaceFolder}\\1-python-quant-engine"
 }
