@@ -11,7 +11,7 @@ load_dotenv()
 PORT = int(os.getenv("PORT", 8000))
 HOST = os.getenv("HOST", "127.0.0.1")
 MAX_SIMULATIONS = int(os.getenv("MAX_SIMULATIONS", 250000))
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "quant_desk_dev_secert_2026")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "quant_desk_dev_secret_2026")
 
 app = FastAPI(title="QuantDesk Python Pricing Engine")
 
@@ -43,6 +43,16 @@ def calculate_option(data: OptionInput, x_internal_api_key: str | None = Header(
     #call monte carlo pricer
     mc_price = monte_carlo_price(data.spotPrice, data.strikePrice,data.timeToExpiry,data.riskFreeRate,data.volatility,data.optionType,safe_sims)
 
+    return {
+        "blackScholesPrice": bs["price"],
+        "monteCarloPrice": mc_price,
+        "delta": bs["delta"],
+        "gamma": bs["gamma"],
+        "vega": bs["vega"],
+        "theta": bs["theta"],
+        "rho": bs["rho"],
+        "payoffCurve": bs["payoffCurve"]
+    }
 
 
 
