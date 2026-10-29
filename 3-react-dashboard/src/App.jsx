@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LineChart,
   Line,
@@ -6,30 +6,36 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
 import {
-  Activity,
-  Cpu,
+  Terminal,
+  BookOpen,
+  RefreshCw,
   Server,
+  Cpu,
+  CheckCircle2,
+  AlertTriangle,
+  Sliders,
+  Layers,
+  Shuffle,
   TrendingUp,
   TrendingDown,
-  Zap,
-  RefreshCw,
-  AlertCircle,
-  CheckCircle2,
+  Info,
 } from "lucide-react";
 
-// --- Local Fallback Math (Only used when "Local Sandbox Mode" is active) ---
+// --- Institutional Palette for Monte Carlo Spaghetti Paths ---
+const PATH_COLORS = [
+  "#2563eb", "#dc2626", "#16a34a", "#d97706", "#9333ea",
+  "#0891b2", "#db2777", "#4f46e5", "#ca8a04", "#0d9488",
+  "#e11d48", "#7c3aed", "#0284c7", "#65a30d", "#ea580c",
+];
+
+// --- Standard Normal CDF & PDF ---
 function normCDF(x) {
-  const a1 = 0.254829592,
-    a2 = -0.284496736,
-    a3 = 1.421413741,
-    a4 = -1.453152027,
-    a5 = 1.061405429,
-    p = 0.3275911;
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
   const sign = x < 0 ? -1 : 1;
   const absX = Math.abs(x) / Math.sqrt(2.0);
   const t = 1.0 / (1.0 + p * absX);
@@ -45,120 +51,336 @@ function normPDF(x) {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
-function calculateLocalOption(S, K, T, r, sigma, optionType, simulations = 2000) {
-  const safeT = Math.max(T, 0.0001);
+// --- Full Analytical + Stochastic Engine ---
+function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
+  const safeT = Math.max(T, 1e-6);
   const sqrtT = Math.sqrt(safeT);
   const d1 =
     (Math.log(S / K) + (r + 0.5 * sigma * sigma) * safeT) / (sigma * sqrtT);
   const d2 = d1 - sigma * sqrtT;
-
   const isCall = optionType === "call";
+
   const bsPrice = isCall
     ? S * normCDF(d1) - K * Math.exp(-r * safeT) * normCDF(d2)
     : K * Math.exp(-r * safeT) * normCDF(-d2) - S * normCDF(-d1);
 
-  const delta = isCall ? normCDF(d1) : normCDF(d1) - 1;
+  const delta = isCall ? normCDF(d1) : normCDF(d1) - 1.0;
   const gamma = normPDF(d1) / (S * sigma * sqrtT);
-  const vega = (S * normPDF(d1) * sqrtT) / 100; // per 1% vol change
+  const vega = (S * normPDF(d1) * sqrtT) / 100.0;
   const theta =
     isCall
       ? (-(S * normPDF(d1) * sigma) / (2 * sqrtT) -
           r * K * Math.exp(-r * safeT) * normCDF(d2)) /
-        365
+        365.0
       : (-(S * normPDF(d1) * sigma) / (2 * sqrtT) +
           r * K * Math.exp(-r * safeT) * normCDF(-d2)) /
-        365;
+        365.0;
   const rho =
     isCall
-      ? (K * safeT * Math.exp(-r * safeT) * normCDF(d2)) / 100
-      : (-K * safeT * Math.exp(-r * safeT) * normCDF(-d2)) / 100;
+      ? (K * safeT * Math.exp(-r * safeT) * normCDF(d2)) / 100.0
+      : (-K * safeT * Math.exp(-r * safeT) * normCDF(-d2)) / 100.0;
 
-  // Quick Box-Muller Monte Carlo
-  let payoffSum = 0;
-  for (let i = 0; i < simulations; i++) {
+  // Risk-neutral probability of expiring In-The-Money (N(d2) or N(-d2))
+  const probITM = (isCall ? normCDF(d2) : normCDF(-d2)) * 100;
+
+  // Monte Carlo Simulation with Standard Error & 95% Confidence Interval
+  const nSims = Math.min(Math.max(simulations, 500), 50000);
+  let sumPayoffs = 0;
+  let sumSqPayoffs = 0;
+  const discount = Math.exp(-r * safeT);
+
+  for (let i = 0; i < nSims; i++) {
     const u1 = Math.random() || 1e-10;
     const u2 = Math.random();
     const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
     const ST =
       S * Math.exp((r - 0.5 * sigma * sigma) * safeT + sigma * sqrtT * z);
-    const payoff = isCall ? Math.max(ST - K, 0) : Math.max(K - ST, 0);
-    payoffSum += payoff;
+    const payoff = discount * (isCall ? Math.max(ST - K, 0) : Math.max(K - ST, 0));
+    sumPayoffs += payoff;
+    sumSqPayoffs += payoff * payoff;
   }
-  const mcPrice = Math.exp(-r * safeT) * (payoffSum / simulations);
 
-  // Payoff Curve across Spot Range
-  const payoffSeries = [];
-  const minSpot = Math.max(10, Math.round(K * 0.5));
-  const maxSpot = Math.round(K * 1.5);
-  const step = Math.max(1, Math.round((maxSpot - minSpot) / 40));
+  const mcPrice = sumPayoffs / nSims;
+  const variance = Math.max(0, sumSqPayoffs / nSims - mcPrice * mcPrice);
+  const stdError = Math.sqrt(variance / nSims);
 
-  for (let spot = minSpot; spot <= maxSpot; spot += step) {
+  // Payoff + Greeks Curve across Spot Range
+  const payoffCurve = [];
+  const minSpot = Math.max(5, Math.round(K * 0.55));
+  const maxSpot = Math.round(K * 1.45);
+  const step = Math.max(1, Math.round((maxSpot - minSpot) / 45));
+
+  for (let s = minSpot; s <= maxSpot; s += step) {
     const d1_s =
-      (Math.log(spot / K) + (r + 0.5 * sigma * sigma) * safeT) /
-      (sigma * sqrtT);
+      (Math.log(s / K) + (r + 0.5 * sigma * sigma) * safeT) / (sigma * sqrtT);
     const d2_s = d1_s - sigma * sqrtT;
-    const theoValue = isCall
-      ? spot * normCDF(d1_s) - K * Math.exp(-r * safeT) * normCDF(d2_s)
-      : K * Math.exp(-r * safeT) * normCDF(-d2_s) - spot * normCDF(-d1_s);
-    const intrinsic = isCall ? Math.max(spot - K, 0) : Math.max(K - spot, 0);
+    const theo = isCall
+      ? s * normCDF(d1_s) - K * discount * normCDF(d2_s)
+      : K * discount * normCDF(-d2_s) - s * normCDF(-d1_s);
+    const intrinsic = isCall ? Math.max(s - K, 0) : Math.max(K - s, 0);
+    const spotDelta = isCall ? normCDF(d1_s) : normCDF(d1_s) - 1.0;
+    const spotGamma = normPDF(d1_s) / (s * sigma * sqrtT);
 
-    payoffSeries.push({
-      spot: Number(spot.toFixed(2)),
+    payoffCurve.push({
+      spot: Number(s.toFixed(2)),
       expirationPayoff: Number(intrinsic.toFixed(2)),
-      currentTheoreticalValue: Number(theoValue.toFixed(2)),
+      currentTheoreticalValue: Number(theo.toFixed(2)),
       netProfitAtExpiry: Number((intrinsic - bsPrice).toFixed(2)),
+      delta: Number(spotDelta.toFixed(4)),
+      gamma: Number(spotGamma.toFixed(4)),
     });
   }
 
   return {
     blackScholesPrice: bsPrice,
     monteCarloPrice: mcPrice,
+    stdError,
+    ci95Low: mcPrice - 1.96 * stdError,
+    ci95High: mcPrice + 1.96 * stdError,
+    d1,
+    d2,
+    probITM,
     delta,
     gamma,
     vega,
     theta,
     rho,
-    payoffCurve: payoffSeries,
+    payoffCurve,
   };
 }
 
+// --- Multi-Step Geometric Brownian Motion Path Generator (Spaghetti Plot) ---
+function generateSpaghettiPaths(S, T, r, sigma, numPaths = 75, numSteps = 62) {
+  const safeT = Math.max(T, 1e-6);
+  const dt = safeT / numSteps;
+  const drift = (r - 0.5 * sigma * sigma) * dt;
+  const volStep = sigma * Math.sqrt(dt);
+
+  const paths = [];
+  let minPrice = S;
+  let maxPrice = S;
+
+  for (let p = 0; p < numPaths; p++) {
+    const singlePath = [S];
+    let currentS = S;
+    for (let step = 1; step <= numSteps; step++) {
+      const u1 = Math.random() || 1e-10;
+      const u2 = Math.random();
+      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+      currentS = currentS * Math.exp(drift + volStep * z);
+      singlePath.push(currentS);
+      if (currentS < minPrice) minPrice = currentS;
+      if (currentS > maxPrice) maxPrice = currentS;
+    }
+    paths.push(singlePath);
+  }
+
+  return { paths, minPrice, maxPrice, numSteps };
+}
+
+// --- High-FPS HTML5 Canvas Component for Monte Carlo Asset Paths ---
+function MonteCarloSpaghettiCanvas({
+  spotPrice,
+  strikePrice,
+  timeInYears,
+  rateDecimal,
+  volDecimal,
+  numPaths,
+  seed,
+  whitePaperTheme,
+}) {
+  const canvasRef = useRef(null);
+
+  const simData = useMemo(
+    () =>
+      generateSpaghettiPaths(
+        spotPrice,
+        timeInYears,
+        rateDecimal,
+        volDecimal,
+        numPaths,
+        62
+      ),
+    [spotPrice, timeInYears, rateDecimal, volDecimal, numPaths, seed]
+  );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const width = rect.width;
+    const height = rect.height;
+    const pad = { top: 36, right: 24, bottom: 42, left: 56 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+
+    // Background
+    ctx.fillStyle = whitePaperTheme ? "#ffffff" : "#0c0c0e";
+    ctx.fillRect(0, 0, width, height);
+
+    const { paths, minPrice, maxPrice, numSteps } = simData;
+    const yMin = Math.floor(Math.min(minPrice, strikePrice) * 0.96);
+    const yMax = Math.ceil(Math.max(maxPrice, strikePrice) * 1.04);
+
+    const toX = (step) => pad.left + (step / numSteps) * plotW;
+    const toY = (price) =>
+      pad.top + plotH - ((price - yMin) / Math.max(1e-5, yMax - yMin)) * plotH;
+
+    // Subtle Gridlines
+    ctx.strokeStyle = whitePaperTheme ? "#e5e7eb" : "#1f1f24";
+    ctx.lineWidth = 1;
+    const yTicks = 5;
+    for (let i = 0; i <= yTicks; i++) {
+      const val = yMin + ((yMax - yMin) * i) / yTicks;
+      const y = toY(val);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(width - pad.right, y);
+      ctx.stroke();
+
+      ctx.fillStyle = whitePaperTheme ? "#111827" : "#a1a1aa";
+      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(val.toFixed(0), pad.left - 8, y + 4);
+    }
+
+    // X-Axis Time Step Ticks (0, 10, 20, 30, 40, 50, 60)
+    for (let step = 0; step <= numSteps; step += 10) {
+      const x = toX(step);
+      ctx.fillStyle = whitePaperTheme ? "#111827" : "#a1a1aa";
+      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(String(step), x, height - pad.bottom + 18);
+    }
+
+    // Draw All Simulated Asset Paths
+    paths.forEach((path, idx) => {
+      ctx.beginPath();
+      ctx.strokeStyle = PATH_COLORS[idx % PATH_COLORS.length];
+      ctx.lineWidth = 1.35;
+      ctx.globalAlpha = whitePaperTheme ? 0.88 : 0.82;
+      for (let step = 0; step <= numSteps; step++) {
+        const x = toX(step);
+        const y = toY(path[step]);
+        if (step === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    });
+    ctx.globalAlpha = 1.0;
+
+    // Strike Price Reference Line
+    if (strikePrice >= yMin && strikePrice <= yMax) {
+      const strikeY = toY(strikePrice);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = whitePaperTheme ? "#111827" : "#f59e0b";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, strikeY);
+      ctx.lineTo(width - pad.right, strikeY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Plot Border Box
+    ctx.strokeStyle = whitePaperTheme ? "#111827" : "#27272a";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad.left, pad.top, plotW, plotH);
+
+    // Chart Title & Axis Titles
+    ctx.fillStyle = whitePaperTheme ? "#111827" : "#f4f4f5";
+    ctx.font = "600 13px Inter, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      `Monte-Carlo Simulation of an Asset Price (${numPaths} Paths)`,
+      width / 2,
+      22
+    );
+
+    ctx.font = "12px Inter, system-ui, sans-serif";
+    ctx.fillText("time steps", width / 2, height - 6);
+
+    ctx.save();
+    ctx.translate(16, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Price ($)", 0, 0);
+    ctx.restore();
+  }, [simData, strikePrice, numPaths, whitePaperTheme]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="w-full h-[340px] rounded border border-zinc-800 block"
+    />
+  );
+}
+
 export default function App() {
-  // --- Option Input State ---
+  // --- Experience Mode: "guided" (Beginner) vs "pro" (Institutional Sim) ---
+  const [uiMode, setUiMode] = useState("pro");
+
+  // --- Chart View Tab ---
+  const [activeTab, setActiveTab] = useState("spaghetti"); // "spaghetti" | "payoff" | "greeks"
+  const [whitePaperPlot, setWhitePaperPlot] = useState(false);
+  const [spaghettiCount, setSpaghettiCount] = useState(80);
+  const [pathSeed, setPathSeed] = useState(1);
+
+  // --- Option Contract Inputs ---
   const [spotPrice, setSpotPrice] = useState(100);
   const [strikePrice, setStrikePrice] = useState(100);
-  const [daysToExpiry, setDaysToExpiry] = useState(90);
-  const [volatility, setVolatility] = useState(25); // in %
-  const [riskFreeRate, setRiskFreeRate] = useState(4.5); // in %
+  const [daysToExpiry, setDaysToExpiry] = useState(60);
+  const [volatility, setVolatility] = useState(20);
+  const [riskFreeRate, setRiskFreeRate] = useState(4.5);
   const [optionType, setOptionType] = useState("call");
-  const [mcSimulations, setMcSimulations] = useState(10000);
+  const [mcSimulations, setMcSimulations] = useState(25000);
 
   // --- Backend Connection State ---
-  const [useLiveBackend, setUseLiveBackend] = useState(false);
+  const [useLiveBackend, setUseLiveBackend] = useState(true);
   const [apiUrl, setApiUrl] = useState(
-  import.meta.env.VITE_CSHARP_API_URL || "http://localhost:5000/api/options/price"
-);
+    import.meta.env.VITE_CSHARP_API_URL ||
+      "http://localhost:5000/api/options/price"
+  );
   const [apiData, setApiData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [latencyMs, setLatencyMs] = useState(null);
 
   const timeInYears = daysToExpiry / 365;
   const volDecimal = volatility / 100;
   const rateDecimal = riskFreeRate / 100;
 
-  // --- Calculate Local Data ---
-  const localResult = useMemo(() => {
-    return calculateLocalOption(
+  // --- Local Baseline Analytics ---
+  const localAnalytics = useMemo(
+    () =>
+      computeQuantAnalytics(
+        spotPrice,
+        strikePrice,
+        timeInYears,
+        rateDecimal,
+        volDecimal,
+        optionType,
+        mcSimulations
+      ),
+    [
       spotPrice,
       strikePrice,
       timeInYears,
       rateDecimal,
       volDecimal,
       optionType,
-      Math.min(mcSimulations, 5000)
-    );
-  }, [spotPrice, strikePrice, timeInYears, rateDecimal, volDecimal, optionType, mcSimulations]);
+      mcSimulations,
+    ]
+  );
 
-  // --- Fetch from C# + Python Backend when Live Mode is Enabled ---
+  // --- Live C# + Python API Fetch ---
   useEffect(() => {
     if (!useLiveBackend) {
       setApiError(null);
@@ -166,11 +388,12 @@ export default function App() {
     }
 
     const controller = new AbortController();
-    const fetchFromBackend = async () => {
+    const timer = setTimeout(async () => {
       setLoading(true);
       setApiError(null);
+      const t0 = performance.now();
       try {
-        const response = await fetch(apiUrl, {
+        const res = await fetch(apiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -179,32 +402,27 @@ export default function App() {
             timeToExpiry: Number(timeInYears),
             riskFreeRate: Number(rateDecimal),
             volatility: Number(volDecimal),
-            optionType: optionType,
+            optionType,
             simulations: Number(mcSimulations),
           }),
           signal: controller.signal,
         });
 
-        if (!response.ok) {
-          throw new Error(`C# API returned HTTP ${response.status}`);
-        }
-        const json = await response.json();
-        setApiData({
-          ...json,
-          payoffCurve: json.payoffCurve || localResult.payoffCurve,
-        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        setLatencyMs(Math.round(performance.now() - t0));
+        setApiData(json);
       } catch (err) {
         if (err.name !== "AbortError") {
-          setApiError(err.message || "Failed to connect to C# API on Port 5000");
+          setApiError(err.message || "Offline");
         }
       } finally {
         setLoading(false);
       }
-    };
+    }, 90);
 
-    const debounce = setTimeout(fetchFromBackend, 120);
     return () => {
-      clearTimeout(debounce);
+      clearTimeout(timer);
       controller.abort();
     };
   }, [
@@ -217,441 +435,833 @@ export default function App() {
     volDecimal,
     optionType,
     mcSimulations,
-    localResult.payoffCurve,
   ]);
 
-  const activeData = useLiveBackend && apiData && !apiError ? apiData : localResult;
-  const mcDiff = Math.abs(
-    activeData.blackScholesPrice - activeData.monteCarloPrice
-  );
+  // Merge Live API Prices/Greeks with Local High-Res Diagnostics
+  const active = useMemo(() => {
+    if (useLiveBackend && apiData && !apiError) {
+      return {
+        ...localAnalytics,
+        ...apiData,
+        payoffCurve:
+          apiData.payoffCurve && apiData.payoffCurve.length > 0
+            ? apiData.payoffCurve.map((pt, i) => ({
+                ...localAnalytics.payoffCurve[i],
+                ...pt,
+              }))
+            : localAnalytics.payoffCurve,
+      };
+    }
+    return localAnalytics;
+  }, [useLiveBackend, apiData, apiError, localAnalytics]);
+
+  const breakEvenPrice =
+    optionType === "call"
+      ? strikePrice + active.blackScholesPrice
+      : strikePrice - active.blackScholesPrice;
+
+  const intrinsicNow =
+    optionType === "call"
+      ? Math.max(0, spotPrice - strikePrice)
+      : Math.max(0, strikePrice - spotPrice);
+  const extrinsicNow = Math.max(0, active.blackScholesPrice - intrinsicNow);
+
+  // Spot x Vol Heatmap Matrix for Pro Desk Mode
+  const scenarioMatrix = useMemo(() => {
+    const spotShifts = [-10, -5, 0, 5, 10];
+    const volShifts = [-5, 0, 5];
+    return volShifts.map((vShift) => {
+      const testVol = Math.max(0.02, (volatility + vShift) / 100);
+      return {
+        volLabel: `${(testVol * 100).toFixed(0)}% Vol`,
+        cells: spotShifts.map((sShift) => {
+          const testSpot = Math.max(1, spotPrice * (1 + sShift / 100));
+          const res = computeQuantAnalytics(
+            testSpot,
+            strikePrice,
+            timeInYears,
+            rateDecimal,
+            testVol,
+            optionType,
+            500
+          );
+          const pnl = res.blackScholesPrice - active.blackScholesPrice;
+          return {
+            spotLabel: `${sShift >= 0 ? "+" : ""}${sShift}%`,
+            theo: res.blackScholesPrice,
+            pnl,
+          };
+        }),
+      };
+    });
+  }, [
+    spotPrice,
+    strikePrice,
+    timeInYears,
+    rateDecimal,
+    volatility,
+    optionType,
+    active.blackScholesPrice,
+  ]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans p-4 md:p-8">
-      {/* Top Header */}
-      <header className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-6 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
-              <Activity className="w-6 h-6" />
-            </div>
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
-              QuantDesk{" "}
-              <span className="text-emerald-400 font-mono text-lg font-normal">
-                v1.0 // Black-Scholes & Monte Carlo Engine
+    <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans antialiased selection:bg-amber-500/20 selection:text-amber-300">
+      {/* Top Institutional Command Bar */}
+      <header className="border-b border-zinc-800 bg-[#0c0c0f] px-4 lg:px-6 py-2.5">
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
+          {/* Brand & Ticker */}
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-5 bg-amber-500 rounded-xs" />
+              <span className="font-mono font-bold tracking-tight text-sm uppercase text-zinc-100">
+                QUANTDESK
               </span>
-            </h1>
+              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
+                DERIVATIVES // BS-MC
+              </span>
+            </div>
+
+            {/* Live Connection Status Pill */}
+            <div className="hidden md:flex items-center gap-2 text-xs font-mono border-l border-zinc-800 pl-4">
+              {useLiveBackend ? (
+                apiError ? (
+                  <span className="flex items-center gap-1.5 text-amber-400">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    API OFFLINE (LOCAL FALLBACK)
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-emerald-400">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    C# + PYTHON CONNECTED{" "}
+                    {latencyMs !== null && (
+                      <span className="text-zinc-500">({latencyMs}ms)</span>
+                    )}
+                  </span>
+                )
+              ) : (
+                <span className="text-zinc-400">LOCAL JS SANDBOX</span>
+              )}
+            </div>
           </div>
-          <p className="text-slate-400 text-sm mt-1">
-            React Visualization Layer → C# ASP.NET Core Gateway → Python
-            SciPy/NumPy Pricing Engine
-          </p>
-        </div>
 
-        {/* Mode Switcher */}
-        <div className="flex flex-wrap items-center gap-3 bg-slate-900/90 p-2 rounded-xl border border-slate-800">
-          <button
-            onClick={() => setUseLiveBackend(false)}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
-              !useLiveBackend
-                ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Cpu className="w-4 h-4" />
-            Local Sandbox Mode
-          </button>
+          {/* Right Controls: Experience Mode Switcher + Backend Switcher */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Beginner vs Pro Mode Switcher */}
+            <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs">
+              <button
+                onClick={() => setUiMode("guided")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition ${
+                  uiMode === "guided"
+                    ? "bg-amber-500 text-zinc-950 font-semibold"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                Guided Mode (Beginner)
+              </button>
+              <button
+                onClick={() => setUiMode("pro")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition ${
+                  uiMode === "pro"
+                    ? "bg-amber-500 text-zinc-950 font-semibold"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                Pro Desk (Quant Sim)
+              </button>
+            </div>
 
-          <button
-            onClick={() => setUseLiveBackend(true)}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
-              useLiveBackend
-                ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Server className="w-4 h-4" />
-            Live C# + Python API
-          </button>
+            {/* Engine Toggle */}
+            <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs font-mono">
+              <button
+                onClick={() => setUseLiveBackend(false)}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition ${
+                  !useLiveBackend
+                    ? "bg-zinc-700 text-white"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                Sandbox
+              </button>
+              <button
+                onClick={() => setUseLiveBackend(true)}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition ${
+                  useLiveBackend
+                    ? "bg-emerald-600 text-white"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Server className="w-3.5 h-3.5" />
+                Live API
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
-      {/* Connection Banner when Live Mode is active */}
-      {useLiveBackend && (
-        <div className="max-w-7xl mx-auto mt-4">
-          <div
-            className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-3 rounded-xl border text-xs ${
-              apiError
-                ? "bg-rose-950/40 border-rose-500/40 text-rose-300"
-                : "bg-emerald-950/30 border-emerald-500/30 text-emerald-300"
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              {loading ? (
-                <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
-              ) : apiError ? (
-                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-              ) : (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              )}
-              <span>
-                {loading
-                  ? "Querying C# Gateway -> Python Engine..."
-                  : apiError
-                  ? `Backend Offline (${apiError}) — Showing Local Fallback Math until you boot C# & Python!`
-                  : "Connected live to C# Gateway & Python FastAPI Engine!"}
+      {/* Main Workstation Container */}
+      <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* LEFT PANEL: Contract Ticket & Parameter Controls (3 cols in Pro, 4 in Guided) */}
+        <aside
+          className={`${
+            uiMode === "pro" ? "lg:col-span-3" : "lg:col-span-4"
+          } bg-[#111114] border border-zinc-800/90 rounded flex flex-col justify-between`}
+        >
+          <div className="p-4 space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
+              <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-amber-500" />
+                Order / Parameter Ticket
               </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-slate-400">Endpoint:</span>
-              <input
-                type="text"
-                value={apiUrl}
-                onChange={(e) => setApiUrl(e.target.value)}
-                className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono text-xs w-64"
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main Grid */}
-      <main className="max-w-7xl mx-auto mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* LEFT COLUMN: Controls & Sliders (4 cols) */}
-        <section className="lg:col-span-4 bg-slate-900/70 border border-slate-800 rounded-2xl p-5 flex flex-col gap-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
-              Contract Parameters
-            </h2>
-            <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-              T = {timeInYears.toFixed(3)} yrs
-            </span>
-          </div>
-
-          {/* Call / Put Toggle */}
-          <div className="grid grid-cols-2 gap-2 p-1 bg-slate-950 rounded-xl border border-slate-800">
-            <button
-              onClick={() => setOptionType("call")}
-              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg font-semibold text-sm transition-all ${
-                optionType === "call"
-                  ? "bg-emerald-600 text-white shadow-md"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <TrendingUp className="w-4 h-4" />
-              CALL OPTION
-            </button>
-            <button
-              onClick={() => setOptionType("put")}
-              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg font-semibold text-sm transition-all ${
-                optionType === "put"
-                  ? "bg-rose-600 text-white shadow-md"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <TrendingDown className="w-4 h-4" />
-              PUT OPTION
-            </button>
-          </div>
-
-          {/* Parameter Sliders */}
-          <div className="space-y-4">
-            {/* Spot Price */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Spot Price (S)</span>
-                <span className="font-mono font-bold text-emerald-400">
-                  ${spotPrice.toFixed(2)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="20"
-                max="200"
-                step="1"
-                value={spotPrice}
-                onChange={(e) => setSpotPrice(Number(e.target.value))}
-                className="w-full accent-emerald-500 cursor-pointer"
-              />
-            </div>
-
-            {/* Strike Price */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Strike Price (K)</span>
-                <span className="font-mono font-bold text-indigo-400">
-                  ${strikePrice.toFixed(2)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="20"
-                max="200"
-                step="1"
-                value={strikePrice}
-                onChange={(e) => setStrikePrice(Number(e.target.value))}
-                className="w-full accent-indigo-500 cursor-pointer"
-              />
-            </div>
-
-            {/* Volatility */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Implied Volatility (σ)</span>
-                <span className="font-mono font-bold text-amber-400">
-                  {volatility.toFixed(1)}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="5"
-                max="120"
-                step="0.5"
-                value={volatility}
-                onChange={(e) => setVolatility(Number(e.target.value))}
-                className="w-full accent-amber-500 cursor-pointer"
-              />
-            </div>
-
-            {/* Days to Expiry */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Days to Expiry (T)</span>
-                <span className="font-mono font-bold text-cyan-400">
-                  {daysToExpiry} days
-                </span>
-              </div>
-              <input
-                type="range"
-                min="1"
-                max="730"
-                step="1"
-                value={daysToExpiry}
-                onChange={(e) => setDaysToExpiry(Number(e.target.value))}
-                className="w-full accent-cyan-500 cursor-pointer"
-              />
-            </div>
-
-            {/* Risk-Free Rate */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Risk-Free Rate (r)</span>
-                <span className="font-mono font-bold text-purple-400">
-                  {riskFreeRate.toFixed(2)}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="15"
-                step="0.25"
-                value={riskFreeRate}
-                onChange={(e) => setRiskFreeRate(Number(e.target.value))}
-                className="w-full accent-purple-500 cursor-pointer"
-              />
-            </div>
-
-            {/* Monte Carlo Paths */}
-            <div className="pt-2 border-t border-slate-800">
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Monte Carlo Paths (N)</span>
-                <span className="font-mono font-bold text-slate-200">
-                  {mcSimulations.toLocaleString()}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="500"
-                max="100000"
-                step="500"
-                value={mcSimulations}
-                onChange={(e) => setMcSimulations(Number(e.target.value))}
-                className="w-full accent-slate-400 cursor-pointer"
-              />
-            </div>
-          </div>
-
-          {/* Moneyness Badge */}
-          <div className="mt-auto p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 flex items-center justify-between text-xs">
-            <span className="text-slate-400">Contract Status:</span>
-            <span className="font-mono font-bold uppercase px-2.5 py-1 rounded bg-slate-800 text-white">
-              {spotPrice === strikePrice
-                ? "At-The-Money (ATM)"
-                : (optionType === "call" && spotPrice > strikePrice) ||
-                  (optionType === "put" && spotPrice < strikePrice)
-                ? "In-The-Money (ITM)"
-                : "Out-Of-The-Money (OTM)"}
-            </span>
-          </div>
-        </section>
-
-        {/* RIGHT COLUMN: Pricing Cards, Greeks & Charts (8 cols) */}
-        <section className="lg:col-span-8 flex flex-col gap-6">
-          {/* Top Pricing Comparison Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5">
-              <span className="text-xs uppercase tracking-wider text-slate-400">
-                Black-Scholes Price
-              </span>
-              <div className="text-3xl font-mono font-bold text-emerald-400 mt-1">
-                ${activeData.blackScholesPrice.toFixed(4)}
-              </div>
-              <span className="text-xs text-slate-500 mt-1 block">
-                Exact analytical solution
+              <span className="text-[11px] font-mono text-zinc-400">
+                T = {timeInYears.toFixed(4)}y
               </span>
             </div>
 
-            <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5">
-              <span className="text-xs uppercase tracking-wider text-slate-400">
-                Monte Carlo Price
-              </span>
-              <div className="text-3xl font-mono font-bold text-indigo-400 mt-1">
-                ${activeData.monteCarloPrice.toFixed(4)}
-              </div>
-              <span className="text-xs text-slate-500 mt-1 block">
-                Simulated ({mcSimulations.toLocaleString()} random paths)
-              </span>
+            {/* Call / Put Selector */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#09090b] rounded border border-zinc-800">
+              <button
+                onClick={() => setOptionType("call")}
+                className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition ${
+                  optionType === "call"
+                    ? "bg-emerald-600 text-white"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <TrendingUp className="w-3.5 h-3.5" />
+                LONG CALL
+              </button>
+              <button
+                onClick={() => setOptionType("put")}
+                className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition ${
+                  optionType === "put"
+                    ? "bg-rose-600 text-white"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <TrendingDown className="w-3.5 h-3.5" />
+                LONG PUT
+              </button>
             </div>
 
-            <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5">
-              <span className="text-xs uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                <Zap className="w-3.5 h-3.5 text-amber-400" /> Convergence Error
-              </span>
-              <div className="text-3xl font-mono font-bold text-amber-400 mt-1">
-                ${mcDiff.toFixed(4)}
-              </div>
-              <span className="text-xs text-slate-500 mt-1 block">
-                |Black-Scholes − Monte Carlo|
-              </span>
+            {/* Quick Moneyness Presets (Pro & Beginner Friendly) */}
+            <div className="flex items-center justify-between gap-1 text-[11px] font-mono">
+              <span className="text-zinc-500">Presets:</span>
+              <button
+                onClick={() => setStrikePrice(Math.round(spotPrice * 0.9))}
+                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
+              >
+                10% ITM
+              </button>
+              <button
+                onClick={() => setStrikePrice(spotPrice)}
+                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-amber-400"
+              >
+                ATM ($S=$K)
+              </button>
+              <button
+                onClick={() => setStrikePrice(Math.round(spotPrice * 1.1))}
+                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
+              >
+                10% OTM
+              </button>
             </div>
-          </div>
 
-          {/* The 5 Greeks Grid */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
-              First & Second-Order Sensitivities (The Greeks)
-            </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            {/* Parameter Inputs (Hybrid Number Box + Slider) */}
+            <div className="space-y-3.5">
               {[
                 {
-                  name: "Delta (Δ)",
-                  val: activeData.delta,
-                  desc: "dV / dS (per $1 spot)",
-                  color: "text-emerald-400",
+                  label: "Underlying Spot (S)",
+                  hint: "Current stock price on the market",
+                  val: spotPrice,
+                  setter: setSpotPrice,
+                  min: 10,
+                  max: 300,
+                  step: 1,
+                  prefix: "$",
                 },
                 {
-                  name: "Gamma (Γ)",
-                  val: activeData.gamma,
-                  desc: "d²V / dS² (convexity)",
-                  color: "text-cyan-400",
+                  label: "Strike Price (K)",
+                  hint: "Locked-in contract exercise price",
+                  val: strikePrice,
+                  setter: setStrikePrice,
+                  min: 10,
+                  max: 300,
+                  step: 1,
+                  prefix: "$",
                 },
                 {
-                  name: "Vega (ν)",
-                  val: activeData.vega,
-                  desc: "dV / dσ (per 1% vol)",
-                  color: "text-amber-400",
+                  label: "Implied Volatility (σ)",
+                  hint: "Expected annualized % swing",
+                  val: volatility,
+                  setter: setVolatility,
+                  min: 2,
+                  max: 150,
+                  step: 0.5,
+                  suffix: "%",
                 },
                 {
-                  name: "Theta (Θ)",
-                  val: activeData.theta,
-                  desc: "dV / dt (daily decay)",
-                  color: "text-rose-400",
+                  label: "Time to Expiry (Days)",
+                  hint: "Calendar days until contract expires",
+                  val: daysToExpiry,
+                  setter: setDaysToExpiry,
+                  min: 1,
+                  max: 730,
+                  step: 1,
+                  suffix: "d",
                 },
                 {
-                  name: "Rho (ρ)",
-                  val: activeData.rho,
-                  desc: "dV / dr (per 1% rate)",
-                  color: "text-purple-400",
+                  label: "Risk-Free Rate (r)",
+                  hint: "Annualized Treasury yield",
+                  val: riskFreeRate,
+                  setter: setRiskFreeRate,
+                  min: 0,
+                  max: 15,
+                  step: 0.25,
+                  suffix: "%",
                 },
-              ].map((g) => (
-                <div
-                  key={g.name}
-                  className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3.5"
-                >
-                  <div className="text-xs text-slate-400 font-medium">
-                    {g.name}
+                {
+                  label: "MC Simulations (N)",
+                  hint: "Random pricing paths generated in Python",
+                  val: mcSimulations,
+                  setter: setMcSimulations,
+                  min: 1000,
+                  max: 100000,
+                  step: 1000,
+                },
+              ].map((item) => (
+                <div key={item.label} className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-300 font-medium">
+                      {item.label}
+                    </span>
+                    <div className="flex items-center bg-[#09090b] border border-zinc-800 rounded px-2 py-0.5">
+                      {item.prefix && (
+                        <span className="text-zinc-500 font-mono text-xs mr-0.5">
+                          {item.prefix}
+                        </span>
+                      )}
+                      <input
+                        type="number"
+                        min={item.min}
+                        max={item.max}
+                        step={item.step}
+                        value={item.val}
+                        onChange={(e) =>
+                          item.setter(
+                            Math.max(item.min, Number(e.target.value) || item.min)
+                          )
+                        }
+                        className="w-16 bg-transparent text-right font-mono font-semibold text-amber-400 focus:outline-none tabular-nums text-xs"
+                      />
+                      {item.suffix && (
+                        <span className="text-zinc-500 font-mono text-xs ml-0.5">
+                          {item.suffix}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className={`text-xl font-mono font-bold mt-1 ${g.color}`}>
-                    {g.val >= 0 ? `+${g.val.toFixed(4)}` : g.val.toFixed(4)}
-                  </div>
-                  <div className="text-[11px] text-slate-500 mt-1">{g.desc}</div>
+                  {uiMode === "guided" && (
+                    <p className="text-[11px] text-zinc-500">{item.hint}</p>
+                  )}
+                  <input
+                    type="range"
+                    min={item.min}
+                    max={item.max}
+                    step={item.step}
+                    value={item.val}
+                    onChange={(e) => item.setter(Number(e.target.value))}
+                    className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                  />
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Payoff & Theoretical Value Chart */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 flex-1 flex flex-col">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-              <div>
-                <h3 className="text-sm font-semibold text-white">
-                  Option Valuation & Expiration Payoff Diagram
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Compare curved Black-Scholes value today vs. hockey-stick
-                  intrinsic value at expiration
+          {/* Bottom Value Decomposition Box */}
+          <div className="p-4 border-t border-zinc-800 bg-[#0c0c0f] space-y-2 text-xs font-mono">
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Intrinsic Value:</span>
+              <span className="text-zinc-200 tabular-nums">
+                ${intrinsicNow.toFixed(2)}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Extrinsic (Time) Value:</span>
+              <span className="text-amber-400 tabular-nums">
+                ${extrinsicNow.toFixed(2)}
+              </span>
+            </div>
+            <div className="flex justify-between pt-1 border-t border-zinc-800/80">
+              <span className="text-zinc-500">Break-Even at Expiry:</span>
+              <span className="text-emerald-400 font-bold tabular-nums">
+                ${breakEvenPrice.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        </aside>
+
+        {/* RIGHT PANEL: Pricing Telemetry, Charts & Risk Matrices */}
+        <section
+          className={`${
+            uiMode === "pro" ? "lg:col-span-9" : "lg:col-span-8"
+          } flex flex-col gap-5`}
+        >
+          {/* GUIDED BEGINNER BANNER (Only shown in Guided Mode) */}
+          {uiMode === "guided" && (
+            <div className="bg-[#111114] border border-amber-500/30 rounded p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase tracking-wider">
+                  <Info className="w-4 h-4" />
+                  Plain-English Trade Summary
+                </div>
+                <p className="text-sm text-zinc-200 leading-relaxed">
+                  This{" "}
+                  <strong className="text-white uppercase">{optionType}</strong>{" "}
+                  option costs{" "}
+                  <strong className="text-emerald-400 font-mono">
+                    ${active.blackScholesPrice.toFixed(2)}
+                  </strong>{" "}
+                  per share. At expiration in{" "}
+                  <strong className="text-white">{daysToExpiry} days</strong>,
+                  the stock must be{" "}
+                  {optionType === "call" ? "above" : "below"}{" "}
+                  <strong className="text-amber-400 font-mono">
+                    ${breakEvenPrice.toFixed(2)}
+                  </strong>{" "}
+                  for you to make a net profit. Your maximum possible loss is
+                  capped at{" "}
+                  <strong className="text-rose-400 font-mono">
+                    ${active.blackScholesPrice.toFixed(2)}
+                  </strong>
+                  .
                 </p>
+              </div>
+              <div className="shrink-0 bg-[#09090b] border border-zinc-800 rounded px-4 py-2.5 text-center">
+                <div className="text-[11px] text-zinc-400 uppercase font-mono">
+                  Prob. of Finishing ITM
+                </div>
+                <div className="text-2xl font-mono font-bold text-amber-400 tabular-nums mt-0.5">
+                  {localAnalytics.probITM.toFixed(1)}%
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TOP TELEMETRY STRIP */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+              <div className="text-[11px] font-mono uppercase text-zinc-400">
+                Black-Scholes Theo
+              </div>
+              <div className="text-2xl font-mono font-bold text-emerald-400 tabular-nums mt-1">
+                ${active.blackScholesPrice.toFixed(4)}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                Closed-Form Exact
               </div>
             </div>
 
-            <div className="h-72 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={activeData.payoffCurve}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <XAxis
-                    dataKey="spot"
-                    stroke="#94a3b8"
-                    tickFormatter={(v) => `$${v}`}
-                  />
-                  <YAxis stroke="#94a3b8" tickFormatter={(v) => `$${v}`} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#0f172a",
-                      borderColor: "#334155",
-                      borderRadius: "0.75rem",
-                    }}
-                  />
-                  <Legend />
-                  <ReferenceLine
-                    x={strikePrice}
-                    stroke="#6366f1"
-                    strokeDasharray="4 4"
-                    label={{
-                      value: `Strike $${strikePrice}`,
-                      fill: "#818cf8",
-                      fontSize: 11,
-                    }}
-                  />
-                  <ReferenceLine
-                    x={spotPrice}
-                    stroke="#10b981"
-                    strokeDasharray="2 2"
-                    label={{
-                      value: `Spot $${spotPrice}`,
-                      fill: "#34d399",
-                      fontSize: 11,
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="currentTheoreticalValue"
-                    name="Black-Scholes Value Today"
-                    stroke="#10b981"
-                    strokeWidth={3}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="expirationPayoff"
-                    name="Intrinsic Value at Expiry"
-                    stroke="#6366f1"
-                    strokeWidth={2}
-                    strokeDasharray="5 5"
-                    dot={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+              <div className="text-[11px] font-mono uppercase text-zinc-400">
+                Monte Carlo Mean
+              </div>
+              <div className="text-2xl font-mono font-bold text-zinc-100 tabular-nums mt-1">
+                ${active.monteCarloPrice.toFixed(4)}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                95% CI: [${localAnalytics.ci95Low.toFixed(2)}, $
+                {localAnalytics.ci95High.toFixed(2)}]
+              </div>
+            </div>
+
+            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+              <div className="text-[11px] font-mono uppercase text-zinc-400">
+                MC Basis Error |BS - MC|
+              </div>
+              <div className="text-2xl font-mono font-bold text-amber-400 tabular-nums mt-1">
+                $
+                {Math.abs(
+                  active.blackScholesPrice - active.monteCarloPrice
+                ).toFixed(4)}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                Std Error (SE): ±${localAnalytics.stdError.toFixed(4)}
+              </div>
+            </div>
+
+            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+              <div className="text-[11px] font-mono uppercase text-zinc-400">
+                d1 / d2 Z-Scores
+              </div>
+              <div className="text-xl font-mono font-bold text-zinc-200 tabular-nums mt-1">
+                {localAnalytics.d1.toFixed(3)}{" "}
+                <span className="text-zinc-600">/</span>{" "}
+                {localAnalytics.d2.toFixed(3)}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                N(d2) ITM Prob: {localAnalytics.probITM.toFixed(1)}%
+              </div>
             </div>
           </div>
+
+          {/* GREEKS STRIP */}
+          <div className="bg-[#111114] border border-zinc-800 rounded p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">
+                First & Second-Order Sensitivities (The Greeks)
+              </span>
+              <span className="text-[11px] font-mono text-zinc-500">
+                {uiMode === "guided"
+                  ? "How your option reacts to market changes"
+                  : "Partial Derivatives ∂V/∂θ"}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              {[
+                {
+                  sym: "DELTA (Δ)",
+                  val: active.delta,
+                  proDesc: "∂V / ∂S (Hedge Ratio)",
+                  begDesc: "P&L per +$1 stock move",
+                },
+                {
+                  sym: "GAMMA (Γ)",
+                  val: active.gamma,
+                  proDesc: "∂²V / ∂S² (Convexity)",
+                  begDesc: "How fast Delta accelerates",
+                },
+                {
+                  sym: "VEGA (ν)",
+                  val: active.vega,
+                  proDesc: "∂V / ∂σ (per 1% Vol)",
+                  begDesc: "P&L per +1% volatility jump",
+                },
+                {
+                  sym: "THETA (Θ)",
+                  val: active.theta,
+                  proDesc: "∂V / ∂t (Daily Carry)",
+                  begDesc: "Value lost per day passing",
+                },
+                {
+                  sym: "RHO (ρ)",
+                  val: active.rho,
+                  proDesc: "∂V / ∂r (per 1% Rate)",
+                  begDesc: "P&L per +1% interest rate",
+                },
+              ].map((g) => (
+                <div
+                  key={g.sym}
+                  className="bg-[#09090b] border border-zinc-800/80 rounded p-3"
+                >
+                  <div className="text-[11px] font-mono text-zinc-400">
+                    {g.sym}
+                  </div>
+                  <div
+                    className={`text-lg font-mono font-bold tabular-nums mt-0.5 ${
+                      g.val < 0 ? "text-rose-400" : "text-zinc-100"
+                    }`}
+                  >
+                    {g.val >= 0 ? `+${g.val.toFixed(4)}` : g.val.toFixed(4)}
+                  </div>
+                  <div className="text-[11px] text-zinc-500 mt-1">
+                    {uiMode === "guided" ? g.begDesc : g.proDesc}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* MULTI-TAB VISUALIZATION WORKSTATION */}
+          <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
+            {/* Tab Header + Controls */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setActiveTab("spaghetti")}
+                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
+                    activeTab === "spaghetti"
+                      ? "bg-amber-500 text-zinc-950 font-semibold"
+                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                  }`}
+                >
+                  1. Monte Carlo Asset Paths (Spaghetti)
+                </button>
+                <button
+                  onClick={() => setActiveTab("payoff")}
+                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
+                    activeTab === "payoff"
+                      ? "bg-amber-500 text-zinc-950 font-semibold"
+                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                  }`}
+                >
+                  2. Payoff & Valuation Curve
+                </button>
+                {uiMode === "pro" && (
+                  <button
+                    onClick={() => setActiveTab("greeks")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
+                      activeTab === "greeks"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    3. Delta / Gamma Surface
+                  </button>
+                )}
+              </div>
+
+              {/* Spaghetti Controls when Tab 1 is active */}
+              {activeTab === "spaghetti" && (
+                <div className="flex items-center gap-2 text-xs font-mono">
+                  <select
+                    value={spaghettiCount}
+                    onChange={(e) => setSpaghettiCount(Number(e.target.value))}
+                    className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300"
+                  >
+                    <option value={30}>30 Paths</option>
+                    <option value={80}>80 Paths</option>
+                    <option value={150}>150 Paths</option>
+                  </select>
+                  <button
+                    onClick={() => setWhitePaperPlot(!whitePaperPlot)}
+                    className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
+                  >
+                    {whitePaperPlot ? "Dark Terminal" : "Classic White Plot"}
+                  </button>
+                  <button
+                    onClick={() => setPathSeed((s) => s + 1)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 border border-zinc-700"
+                  >
+                    <Shuffle className="w-3.5 h-3.5" />
+                    Resimulate
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* TAB 1: MONTE CARLO SPAGHETTI CHART */}
+            {activeTab === "spaghetti" && (
+              <div>
+                <MonteCarloSpaghettiCanvas
+                  spotPrice={spotPrice}
+                  strikePrice={strikePrice}
+                  timeInYears={timeInYears}
+                  rateDecimal={rateDecimal}
+                  volDecimal={volDecimal}
+                  numPaths={spaghettiCount}
+                  seed={pathSeed}
+                  whitePaperTheme={whitePaperPlot}
+                />
+                <div className="mt-2 flex flex-wrap items-center justify-between text-[11px] font-mono text-zinc-500">
+                  <span>
+                    Simulating {spaghettiCount} Geometric Brownian Motion paths
+                    across 62 discrete time steps: S(t+Δt) = S(t)·exp((r -
+                    ½σ²)Δt + σ√Δt·Z)
+                  </span>
+                  <span className="text-amber-400">
+                    Dashed Line = Strike Price (${strikePrice})
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: BLACK-SCHOLES VALUATION & PAYOFF DIAGRAM */}
+            {activeTab === "payoff" && (
+              <div className="h-[340px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={active.payoffCurve}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                    <XAxis
+                      dataKey="spot"
+                      stroke="#71717a"
+                      tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      tickFormatter={(v) => `$${v}`}
+                    />
+                    <YAxis
+                      stroke="#71717a"
+                      tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      tickFormatter={(v) => `$${v}`}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#09090b",
+                        borderColor: "#27272a",
+                        fontFamily: "monospace",
+                        fontSize: "12px",
+                      }}
+                    />
+                    <ReferenceLine
+                      x={strikePrice}
+                      stroke="#f59e0b"
+                      strokeDasharray="4 4"
+                      label={{
+                        value: `Strike $${strikePrice}`,
+                        fill: "#f59e0b",
+                        fontSize: 11,
+                      }}
+                    />
+                    <ReferenceLine
+                      x={spotPrice}
+                      stroke="#10b981"
+                      strokeDasharray="2 2"
+                      label={{
+                        value: `Spot $${spotPrice}`,
+                        fill: "#10b981",
+                        fontSize: 11,
+                      }}
+                    />
+                    <ReferenceLine y={0} stroke="#3f3f46" />
+                    <Line
+                      type="monotone"
+                      dataKey="currentTheoreticalValue"
+                      name="Black-Scholes Value Today"
+                      stroke="#10b981"
+                      strokeWidth={2.5}
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="expirationPayoff"
+                      name="Intrinsic Value at Expiry"
+                      stroke="#f59e0b"
+                      strokeWidth={2}
+                      strokeDasharray="5 5"
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="netProfitAtExpiry"
+                      name="Net P&L at Expiry"
+                      stroke="#6366f1"
+                      strokeWidth={1.75}
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* TAB 3: PRO GREEKS PROFILE ACROSS SPOT */}
+            {activeTab === "greeks" && (
+              <div className="h-[340px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={localAnalytics.payoffCurve}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                    <XAxis
+                      dataKey="spot"
+                      stroke="#71717a"
+                      tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      tickFormatter={(v) => `$${v}`}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      stroke="#10b981"
+                      tick={{ fontSize: 11, fontFamily: "monospace" }}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      stroke="#f59e0b"
+                      tick={{ fontSize: 11, fontFamily: "monospace" }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#09090b",
+                        borderColor: "#27272a",
+                        fontFamily: "monospace",
+                        fontSize: "12px",
+                      }}
+                    />
+                    <ReferenceLine
+                      yAxisId="left"
+                      x={strikePrice}
+                      stroke="#52525b"
+                      strokeDasharray="4 4"
+                    />
+                    <Line
+                      yAxisId="left"
+                      type="monotone"
+                      dataKey="delta"
+                      name="Delta (Δ)"
+                      stroke="#10b981"
+                      strokeWidth={2.5}
+                      dot={false}
+                    />
+                    <Line
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="gamma"
+                      name="Gamma (Γ)"
+                      stroke="#f59e0b"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          {/* PRO DESK SCENARIO MATRIX (Spot Shock vs Volatility Shock) */}
+          {uiMode === "pro" && (
+            <div className="bg-[#111114] border border-zinc-800 rounded p-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-amber-500" />
+                  Spot × Volatility Scenario P&L Matrix (Theo Value / Net Change)
+                </span>
+                <span className="text-[11px] font-mono text-zinc-500">
+                  Base Premium: ${active.blackScholesPrice.toFixed(2)}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono border-collapse">
+                  <thead>
+                    <tr className="border-b border-zinc-800 text-zinc-400">
+                      <th className="py-2 px-3 text-left">Vol \ Spot Shock</th>
+                      {["-10%", "-5%", "0% (Spot)", "+5%", "+10%"].map((h) => (
+                        <th key={h} className="py-2 px-3 text-right">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60">
+                    {scenarioMatrix.map((row) => (
+                      <tr key={row.volLabel} className="hover:bg-zinc-900/40">
+                        <td className="py-2.5 px-3 text-zinc-300 font-semibold">
+                          {row.volLabel}
+                        </td>
+                        {row.cells.map((cell, i) => (
+                          <td
+                            key={i}
+                            className="py-2.5 px-3 text-right tabular-nums"
+                          >
+                            <span className="text-zinc-200">
+                              ${cell.theo.toFixed(2)}
+                            </span>{" "}
+                            <span
+                              className={
+                                cell.pnl >= 0
+                                  ? "text-emerald-400"
+                                  : "text-rose-400"
+                              }
+                            >
+                              ({cell.pnl >= 0 ? "+" : ""}
+                              {cell.pnl.toFixed(2)})
+                            </span>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>
