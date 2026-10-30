@@ -1,4 +1,5 @@
 import numpy as np
+import yfinance as yf
 from scipy.stats import norm
 
 
@@ -96,6 +97,37 @@ def monte_carlo_price(S: float, K: float, T: float, r: float, sigma: float, opti
     discounted_price = float((np.mean(payoffs) * np.exp(-r * T)))
 
     return float(discounted_price)
+
+
+
+def get_live_market_data(ticker: str) -> dict:
+    clean_ticker = ticker.strip().upper()
+    stock = yf.Ticker(clean_ticker)
+
+    #1 year history of daily price bars
+    hist = stock.history(period="1y")
+    if hist.empty or len(hist) < 20:
+        raise ValueError(f"Could not find enough market data for ticker '{clean_ticker}'.")
+    closes = hist["Close"]
+
+    spot_price = (float)(closes.iloc[-1])
+    daily_returns = closes.pct_change().dropna()
+    
+    annual_vol = (float)(np.std(daily_returns) * np.sqrt(252))
+
+    strike_step = 5 if spot_price >= 50 else 1
+    suggested_strike = float(round(spot_price / strike_step) * strike_step)
+
+    return {
+        "ticker": clean_ticker,
+        "spotPrice": round(spot_price, 2),
+        "annualizedVolatility": round(annual_vol, 4),  # e.g. 0.4125 (41.25%)
+        "suggestedStrike": suggested_strike,
+        "tradingDaysSampled": int(len(daily_returns))
+    }
+
+
+
 
 
 

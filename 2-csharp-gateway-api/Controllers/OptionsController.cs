@@ -44,5 +44,29 @@ namespace QuantGateway.Controllers
             //return http 200
             return Ok(result);
         }
+
+        [HttpGet("market/{ticker}")]
+        public async Task<IActionResult> GetMarketData(string ticker)
+        {
+            string pythonBaseUrl = Environment.GetEnvironmentVariable("PYTHON_MARKET_URL") 
+                                   ?? "http://127.0.0.1:8000/market";
+            string apiKey = Environment.GetEnvironmentVariable("INTERNAL_API_KEY") 
+                            ?? "quant_desk_dev_secret_2026";
+
+            // Build GET URL -> e.g. http://127.0.0.1:8000/market/NVDA
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Get, $"{pythonBaseUrl}/{ticker}");
+            httpRequest.Headers.Add("X-Internal-Api-Key", apiKey);
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorText = await response.Content.ReadAsStringAsync();
+                return StatusCode((int)response.StatusCode, $"Market Feed Error: {errorText}");
+            }
+
+            var marketQuote = await response.Content.ReadFromJsonAsync<MarketQuoteResponse>();
+            return Ok(marketQuote);
+        }
     }
 }

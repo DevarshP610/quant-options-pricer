@@ -23,16 +23,25 @@ import {
   TrendingUp,
   TrendingDown,
   Info,
+  Search,
+  Radio,
 } from "lucide-react";
 
-// --- Institutional Palette for Monte Carlo Spaghetti Paths ---
 const PATH_COLORS = [
   "#2563eb", "#dc2626", "#16a34a", "#d97706", "#9333ea",
   "#0891b2", "#db2777", "#4f46e5", "#ca8a04", "#0d9488",
   "#e11d48", "#7c3aed", "#0284c7", "#65a30d", "#ea580c",
 ];
 
-// --- Standard Normal CDF & PDF ---
+// Fallback presets if testing in Offline Sandbox Mode
+const SANDBOX_TICKERS = {
+  SPY: { spotPrice: 582.4, annualizedVolatility: 0.145, suggestedStrike: 580, tradingDaysSampled: 252 },
+  NVDA: { spotPrice: 138.6, annualizedVolatility: 0.485, suggestedStrike: 140, tradingDaysSampled: 252 },
+  AAPL: { spotPrice: 231.2, annualizedVolatility: 0.224, suggestedStrike: 230, tradingDaysSampled: 252 },
+  TSLA: { spotPrice: 254.8, annualizedVolatility: 0.562, suggestedStrike: 255, tradingDaysSampled: 252 },
+  MSFT: { spotPrice: 428.5, annualizedVolatility: 0.215, suggestedStrike: 430, tradingDaysSampled: 252 },
+};
+
 function normCDF(x) {
   const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
   const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
@@ -51,7 +60,6 @@ function normPDF(x) {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
-// --- Full Analytical + Stochastic Engine ---
 function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
   const safeT = Math.max(T, 1e-6);
   const sqrtT = Math.sqrt(safeT);
@@ -80,10 +88,8 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
       ? (K * safeT * Math.exp(-r * safeT) * normCDF(d2)) / 100.0
       : (-K * safeT * Math.exp(-r * safeT) * normCDF(-d2)) / 100.0;
 
-  // Risk-neutral probability of expiring In-The-Money (N(d2) or N(-d2))
   const probITM = (isCall ? normCDF(d2) : normCDF(-d2)) * 100;
 
-  // Monte Carlo Simulation with Standard Error & 95% Confidence Interval
   const nSims = Math.min(Math.max(simulations, 500), 50000);
   let sumPayoffs = 0;
   let sumSqPayoffs = 0;
@@ -104,7 +110,6 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
   const variance = Math.max(0, sumSqPayoffs / nSims - mcPrice * mcPrice);
   const stdError = Math.sqrt(variance / nSims);
 
-  // Payoff + Greeks Curve across Spot Range
   const payoffCurve = [];
   const minSpot = Math.max(5, Math.round(K * 0.55));
   const maxSpot = Math.round(K * 1.45);
@@ -149,7 +154,6 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
   };
 }
 
-// --- Multi-Step Geometric Brownian Motion Path Generator (Spaghetti Plot) ---
 function generateSpaghettiPaths(S, T, r, sigma, numPaths = 75, numSteps = 62) {
   const safeT = Math.max(T, 1e-6);
   const dt = safeT / numSteps;
@@ -178,7 +182,6 @@ function generateSpaghettiPaths(S, T, r, sigma, numPaths = 75, numSteps = 62) {
   return { paths, minPrice, maxPrice, numSteps };
 }
 
-// --- High-FPS HTML5 Canvas Component for Monte Carlo Asset Paths ---
 function MonteCarloSpaghettiCanvas({
   spotPrice,
   strikePrice,
@@ -221,7 +224,6 @@ function MonteCarloSpaghettiCanvas({
     const plotW = width - pad.left - pad.right;
     const plotH = height - pad.top - pad.bottom;
 
-    // Background
     ctx.fillStyle = whitePaperTheme ? "#ffffff" : "#0c0c0e";
     ctx.fillRect(0, 0, width, height);
 
@@ -233,7 +235,6 @@ function MonteCarloSpaghettiCanvas({
     const toY = (price) =>
       pad.top + plotH - ((price - yMin) / Math.max(1e-5, yMax - yMin)) * plotH;
 
-    // Subtle Gridlines
     ctx.strokeStyle = whitePaperTheme ? "#e5e7eb" : "#1f1f24";
     ctx.lineWidth = 1;
     const yTicks = 5;
@@ -251,7 +252,6 @@ function MonteCarloSpaghettiCanvas({
       ctx.fillText(val.toFixed(0), pad.left - 8, y + 4);
     }
 
-    // X-Axis Time Step Ticks (0, 10, 20, 30, 40, 50, 60)
     for (let step = 0; step <= numSteps; step += 10) {
       const x = toX(step);
       ctx.fillStyle = whitePaperTheme ? "#111827" : "#a1a1aa";
@@ -260,7 +260,6 @@ function MonteCarloSpaghettiCanvas({
       ctx.fillText(String(step), x, height - pad.bottom + 18);
     }
 
-    // Draw All Simulated Asset Paths
     paths.forEach((path, idx) => {
       ctx.beginPath();
       ctx.strokeStyle = PATH_COLORS[idx % PATH_COLORS.length];
@@ -276,7 +275,6 @@ function MonteCarloSpaghettiCanvas({
     });
     ctx.globalAlpha = 1.0;
 
-    // Strike Price Reference Line
     if (strikePrice >= yMin && strikePrice <= yMax) {
       const strikeY = toY(strikePrice);
       ctx.save();
@@ -290,12 +288,10 @@ function MonteCarloSpaghettiCanvas({
       ctx.restore();
     }
 
-    // Plot Border Box
     ctx.strokeStyle = whitePaperTheme ? "#111827" : "#27272a";
     ctx.lineWidth = 1;
     ctx.strokeRect(pad.left, pad.top, plotW, plotH);
 
-    // Chart Title & Axis Titles
     ctx.fillStyle = whitePaperTheme ? "#111827" : "#f4f4f5";
     ctx.font = "600 13px Inter, system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -324,14 +320,17 @@ function MonteCarloSpaghettiCanvas({
 }
 
 export default function App() {
-  // --- Experience Mode: "guided" (Beginner) vs "pro" (Institutional Sim) ---
   const [uiMode, setUiMode] = useState("pro");
-
-  // --- Chart View Tab ---
-  const [activeTab, setActiveTab] = useState("spaghetti"); // "spaghetti" | "payoff" | "greeks"
+  const [activeTab, setActiveTab] = useState("spaghetti");
   const [whitePaperPlot, setWhitePaperPlot] = useState(false);
   const [spaghettiCount, setSpaghettiCount] = useState(80);
   const [pathSeed, setPathSeed] = useState(1);
+
+  // --- Phase 2: Live Market Ticker State ---
+  const [tickerInput, setTickerInput] = useState("NVDA");
+  const [activeTicker, setActiveTicker] = useState(null);
+  const [tickerLoading, setTickerLoading] = useState(false);
+  const [tickerError, setTickerError] = useState(null);
 
   // --- Option Contract Inputs ---
   const [spotPrice, setSpotPrice] = useState(100);
@@ -344,12 +343,11 @@ export default function App() {
 
   // --- Backend Connection State ---
   const [useLiveBackend, setUseLiveBackend] = useState(true);
-  const [apiUrl, setApiUrl] = useState(
+  const [apiUrl] = useState(
     import.meta.env.VITE_CSHARP_API_URL ||
       "http://localhost:5000/api/options/price"
   );
   const [apiData, setApiData] = useState(null);
-  const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
   const [latencyMs, setLatencyMs] = useState(null);
 
@@ -357,7 +355,63 @@ export default function App() {
   const volDecimal = volatility / 100;
   const rateDecimal = riskFreeRate / 100;
 
-  // --- Local Baseline Analytics ---
+  // --- Phase 2 Function: Fetch Live Stock Price & Historical Volatility ---
+  const handleFetchMarketTicker = async (symbolToFetch) => {
+    const sym = (symbolToFetch || tickerInput).trim().toUpperCase();
+    if (!sym) return;
+    setTickerInput(sym);
+    setTickerLoading(true);
+    setTickerError(null);
+
+    const baseGatewayUrl = apiUrl.replace(/\/price$/, "");
+    try {
+      if (useLiveBackend) {
+        const res = await fetch(`${baseGatewayUrl}/market/${sym}`);
+        if (!res.ok) {
+          const errMsg = await res.text();
+          throw new Error(errMsg || `Ticker ${sym} not found`);
+        }
+        const data = await res.json();
+        setSpotPrice(Number(data.spotPrice.toFixed(2)));
+        setStrikePrice(Number(data.suggestedStrike.toFixed(2)));
+        setVolatility(
+          Number(
+            Math.min(150, Math.max(5, data.annualizedVolatility * 100)).toFixed(1)
+          )
+        );
+        setActiveTicker({
+          ticker: data.ticker,
+          spotPrice: data.spotPrice,
+          volPct: (data.annualizedVolatility * 100).toFixed(1),
+          days: data.tradingDaysSampled,
+          source: "Yahoo Finance (Live)",
+        });
+      } else {
+        // Offline Sandbox fallback
+        const fallback = SANDBOX_TICKERS[sym] || {
+          spotPrice: 150.0,
+          annualizedVolatility: 0.3,
+          suggestedStrike: 150.0,
+          tradingDaysSampled: 252,
+        };
+        setSpotPrice(fallback.spotPrice);
+        setStrikePrice(fallback.suggestedStrike);
+        setVolatility(Number((fallback.annualizedVolatility * 100).toFixed(1)));
+        setActiveTicker({
+          ticker: sym,
+          spotPrice: fallback.spotPrice,
+          volPct: (fallback.annualizedVolatility * 100).toFixed(1),
+          days: fallback.tradingDaysSampled,
+          source: "Sandbox Preset",
+        });
+      }
+    } catch (err) {
+      setTickerError(`Could not load '${sym}' — check ticker or backend.`);
+    } finally {
+      setTickerLoading(false);
+    }
+  };
+
   const localAnalytics = useMemo(
     () =>
       computeQuantAnalytics(
@@ -380,7 +434,6 @@ export default function App() {
     ]
   );
 
-  // --- Live C# + Python API Fetch ---
   useEffect(() => {
     if (!useLiveBackend) {
       setApiError(null);
@@ -389,7 +442,6 @@ export default function App() {
 
     const controller = new AbortController();
     const timer = setTimeout(async () => {
-      setLoading(true);
       setApiError(null);
       const t0 = performance.now();
       try {
@@ -416,8 +468,6 @@ export default function App() {
         if (err.name !== "AbortError") {
           setApiError(err.message || "Offline");
         }
-      } finally {
-        setLoading(false);
       }
     }, 90);
 
@@ -437,7 +487,6 @@ export default function App() {
     mcSimulations,
   ]);
 
-  // Merge Live API Prices/Greeks with Local High-Res Diagnostics
   const active = useMemo(() => {
     if (useLiveBackend && apiData && !apiError) {
       return {
@@ -466,7 +515,6 @@ export default function App() {
       : Math.max(0, strikePrice - spotPrice);
   const extrinsicNow = Math.max(0, active.blackScholesPrice - intrinsicNow);
 
-  // Spot x Vol Heatmap Matrix for Pro Desk Mode
   const scenarioMatrix = useMemo(() => {
     const spotShifts = [-10, -5, 0, 5, 10];
     const volShifts = [-5, 0, 5];
@@ -505,11 +553,10 @@ export default function App() {
   ]);
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans antialiased selection:bg-amber-500/20 selection:text-amber-300">
+    <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans antialiased">
       {/* Top Institutional Command Bar */}
       <header className="border-b border-zinc-800 bg-[#0c0c0f] px-4 lg:px-6 py-2.5">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
-          {/* Brand & Ticker */}
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <div className="w-2 h-5 bg-amber-500 rounded-xs" />
@@ -517,11 +564,10 @@ export default function App() {
                 QUANTDESK
               </span>
               <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                DERIVATIVES // BS-MC
+                PHASE 2 // YFINANCE LIVE FEED
               </span>
             </div>
 
-            {/* Live Connection Status Pill */}
             <div className="hidden md:flex items-center gap-2 text-xs font-mono border-l border-zinc-800 pl-4">
               {useLiveBackend ? (
                 apiError ? (
@@ -544,9 +590,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right Controls: Experience Mode Switcher + Backend Switcher */}
           <div className="flex flex-wrap items-center gap-2">
-            {/* Beginner vs Pro Mode Switcher */}
             <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs">
               <button
                 onClick={() => setUiMode("guided")}
@@ -572,7 +616,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Engine Toggle */}
             <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs font-mono">
               <button
                 onClick={() => setUseLiveBackend(false)}
@@ -603,17 +646,87 @@ export default function App() {
 
       {/* Main Workstation Container */}
       <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* LEFT PANEL: Contract Ticket & Parameter Controls (3 cols in Pro, 4 in Guided) */}
+        {/* LEFT PANEL: Live Market Feed + Order Ticket */}
         <aside
           className={`${
             uiMode === "pro" ? "lg:col-span-3" : "lg:col-span-4"
           } bg-[#111114] border border-zinc-800/90 rounded flex flex-col justify-between`}
         >
           <div className="p-4 space-y-4">
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
+            {/* PHASE 2: LIVE MARKET TICKER FEED BOX */}
+            <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5" />
+                  Live Equity Feed (yfinance)
+                </span>
+                {activeTicker && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                    {activeTicker.ticker} ${activeTicker.spotPrice}
+                  </span>
+                )}
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleFetchMarketTicker(tickerInput);
+                }}
+                className="flex gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={tickerInput}
+                  onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
+                  placeholder="Ticker (e.g. NVDA, SPY)"
+                  className="flex-1 bg-[#111114] border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono text-white uppercase focus:outline-none focus:border-amber-500"
+                />
+                <button
+                  type="submit"
+                  disabled={tickerLoading}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-semibold text-xs transition cursor-pointer"
+                >
+                  {tickerLoading ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Search className="w-3.5 h-3.5" />
+                  )}
+                  Load
+                </button>
+              </form>
+
+              {/* Quick Ticker Pills */}
+              <div className="flex flex-wrap gap-1">
+                {["SPY", "NVDA", "AAPL", "TSLA", "MSFT"].map((sym) => (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => handleFetchMarketTicker(sym)}
+                    className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-mono text-zinc-300 cursor-pointer"
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
+
+              {tickerError && (
+                <div className="text-[11px] font-mono text-rose-400">
+                  {tickerError}
+                </div>
+              )}
+
+              {activeTicker && !tickerError && (
+                <div className="text-[11px] font-mono text-zinc-400 border-t border-zinc-800/80 pt-2 flex justify-between">
+                  <span>1Y Realized Vol: {activeTicker.volPct}%</span>
+                  <span>({activeTicker.days}d sampled)</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
               <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
                 <Sliders className="w-3.5 h-3.5 text-amber-500" />
-                Order / Parameter Ticket
+                Contract Parameters
               </span>
               <span className="text-[11px] font-mono text-zinc-400">
                 T = {timeInYears.toFixed(4)}y
@@ -646,30 +759,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* Quick Moneyness Presets (Pro & Beginner Friendly) */}
-            <div className="flex items-center justify-between gap-1 text-[11px] font-mono">
-              <span className="text-zinc-500">Presets:</span>
-              <button
-                onClick={() => setStrikePrice(Math.round(spotPrice * 0.9))}
-                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
-              >
-                10% ITM
-              </button>
-              <button
-                onClick={() => setStrikePrice(spotPrice)}
-                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-amber-400"
-              >
-                ATM ($S=$K)
-              </button>
-              <button
-                onClick={() => setStrikePrice(Math.round(spotPrice * 1.1))}
-                className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
-              >
-                10% OTM
-              </button>
-            </div>
-
-            {/* Parameter Inputs (Hybrid Number Box + Slider) */}
+            {/* Parameter Inputs */}
             <div className="space-y-3.5">
               {[
                 {
@@ -678,7 +768,7 @@ export default function App() {
                   val: spotPrice,
                   setter: setSpotPrice,
                   min: 10,
-                  max: 300,
+                  max: 1000,
                   step: 1,
                   prefix: "$",
                 },
@@ -688,12 +778,12 @@ export default function App() {
                   val: strikePrice,
                   setter: setStrikePrice,
                   min: 10,
-                  max: 300,
+                  max: 1000,
                   step: 1,
                   prefix: "$",
                 },
                 {
-                  label: "Implied Volatility (σ)",
+                  label: "Annual Volatility (σ)",
                   hint: "Expected annualized % swing",
                   val: volatility,
                   setter: setVolatility,
@@ -780,7 +870,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Bottom Value Decomposition Box */}
           <div className="p-4 border-t border-zinc-800 bg-[#0c0c0f] space-y-2 text-xs font-mono">
             <div className="flex justify-between">
               <span className="text-zinc-500">Intrinsic Value:</span>
@@ -809,13 +898,13 @@ export default function App() {
             uiMode === "pro" ? "lg:col-span-9" : "lg:col-span-8"
           } flex flex-col gap-5`}
         >
-          {/* GUIDED BEGINNER BANNER (Only shown in Guided Mode) */}
           {uiMode === "guided" && (
             <div className="bg-[#111114] border border-amber-500/30 rounded p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase tracking-wider">
                   <Info className="w-4 h-4" />
-                  Plain-English Trade Summary
+                  Plain-English Trade Summary{" "}
+                  {activeTicker ? `(${activeTicker.ticker})` : ""}
                 </div>
                 <p className="text-sm text-zinc-200 leading-relaxed">
                   This{" "}
@@ -831,12 +920,7 @@ export default function App() {
                   <strong className="text-amber-400 font-mono">
                     ${breakEvenPrice.toFixed(2)}
                   </strong>{" "}
-                  for you to make a net profit. Your maximum possible loss is
-                  capped at{" "}
-                  <strong className="text-rose-400 font-mono">
-                    ${active.blackScholesPrice.toFixed(2)}
-                  </strong>
-                  .
+                  for you to make a net profit.
                 </p>
               </div>
               <div className="shrink-0 bg-[#09090b] border border-zinc-800 rounded px-4 py-2.5 text-center">
@@ -976,7 +1060,6 @@ export default function App() {
 
           {/* MULTI-TAB VISUALIZATION WORKSTATION */}
           <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
-            {/* Tab Header + Controls */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-1.5">
                 <button
@@ -1013,7 +1096,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Spaghetti Controls when Tab 1 is active */}
               {activeTab === "spaghetti" && (
                 <div className="flex items-center gap-2 text-xs font-mono">
                   <select
@@ -1042,7 +1124,6 @@ export default function App() {
               )}
             </div>
 
-            {/* TAB 1: MONTE CARLO SPAGHETTI CHART */}
             {activeTab === "spaghetti" && (
               <div>
                 <MonteCarloSpaghettiCanvas
@@ -1058,8 +1139,7 @@ export default function App() {
                 <div className="mt-2 flex flex-wrap items-center justify-between text-[11px] font-mono text-zinc-500">
                   <span>
                     Simulating {spaghettiCount} Geometric Brownian Motion paths
-                    across 62 discrete time steps: S(t+Δt) = S(t)·exp((r -
-                    ½σ²)Δt + σ√Δt·Z)
+                    across 62 discrete time steps
                   </span>
                   <span className="text-amber-400">
                     Dashed Line = Strike Price (${strikePrice})
@@ -1068,7 +1148,6 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB 2: BLACK-SCHOLES VALUATION & PAYOFF DIAGRAM */}
             {activeTab === "payoff" && (
               <div className="h-[340px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
@@ -1144,7 +1223,6 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB 3: PRO GREEKS PROFILE ACROSS SPOT */}
             {activeTab === "greeks" && (
               <div className="h-[340px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
@@ -1205,7 +1283,6 @@ export default function App() {
             )}
           </div>
 
-          {/* PRO DESK SCENARIO MATRIX (Spot Shock vs Volatility Shock) */}
           {uiMode === "pro" && (
             <div className="bg-[#111114] border border-zinc-800 rounded p-4">
               <div className="flex items-center justify-between mb-3">

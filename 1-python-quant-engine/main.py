@@ -4,7 +4,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
 
-from pricer import black_scholes_all, monte_carlo_price
+from pricer import black_scholes_all, monte_carlo_price, get_live_market_data
 
 #load our .env file data
 load_dotenv()
@@ -28,6 +28,20 @@ class OptionInput(BaseModel):
 @app.get("/health")
 def health_check():
     return{"status": "online", "engine": "NumPy/SciPy Quant Node"}
+
+@app.get("/market/{ticker}")
+def fetch_market_data(
+    ticker: str,
+    x_internal_api_key: str | None = Header(default=None)
+):
+    if x_internal_api_key is not None and x_internal_api_key != INTERNAL_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid Internal Api Key")
+
+    try:
+        return get_live_market_data(ticker)
+    except ValueError as err:
+        # Send HTTP 404 Not Found if someone types a fake ticker symbol
+        raise HTTPException(status_code=404, detail=str(err))
 
 @app.post("/calculate")
 def calculate_option(data: OptionInput, x_internal_api_key: str | None = Header(default=None)):
