@@ -141,7 +141,7 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
     spot_price = float(closes.iloc[-1])
 
     # Continuously compounded log returns: ln(S_t / S_{t-1})
-    log_returns = np.log(closes / closes.shift(1)).dropna()
+    log_returns = np.log((closes / closes.shift(1)).dropna())
     annual_vol = float(np.std(log_returns, ddof=1) * np.sqrt(252))
 
     strike_step = 5 if spot_price >= 50 else 1
