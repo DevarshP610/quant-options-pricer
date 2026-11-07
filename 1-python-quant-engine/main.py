@@ -94,7 +94,20 @@ def calculate_option(
 
 
 @app.post("/implied/vol")
-def calculate_implied_vol(data: ImpliedVolInput, x_internal_api_key: str | None = Header(default = None))
+def calculate_implied_vol(data: ImpliedVolInput, x_internal_api_key: str | None = Header(default = None)):
+    verify_internal_key(x_internal_api_key)
+    try:
+        return solve_implied_volatility(
+            market_price=data.marketPrice,
+            S=data.spotPrice,
+            K=data.strikePrice,
+            T=data.timeToExpiry,
+            r=data.riskFreeRate,
+            option_type=data.optionType,
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+        
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=HOST, port=PORT, reload=True)

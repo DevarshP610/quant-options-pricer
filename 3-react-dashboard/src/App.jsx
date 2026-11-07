@@ -6,6 +6,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
@@ -25,6 +26,7 @@ import {
   Info,
   Search,
   Radio,
+  Compass,
 } from "lucide-react";
 
 const PATH_COLORS = [
@@ -33,7 +35,6 @@ const PATH_COLORS = [
   "#e11d48", "#7c3aed", "#0284c7", "#65a30d", "#ea580c",
 ];
 
-// Fallback presets if testing in Offline Sandbox Mode
 const SANDBOX_TICKERS = {
   SPY: { spotPrice: 582.4, annualizedVolatility: 0.145, suggestedStrike: 580, tradingDaysSampled: 252 },
   NVDA: { spotPrice: 138.6, annualizedVolatility: 0.485, suggestedStrike: 140, tradingDaysSampled: 252 },
@@ -60,6 +61,57 @@ function normPDF(x) {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
+function bsPriceJS(S, K, T, r, sigma, optionType) {
+  const safeT = Math.max(T, 1e-6);
+  const sqrtT = Math.sqrt(safeT);
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * safeT) / (sigma * sqrtT);
+  const d2 = d1 - sigma * sqrtT;
+  const discount = Math.exp(-r * safeT);
+  return optionType === "call"
+    ? S * normCDF(d1) - K * discount * normCDF(d2)
+    : K * discount * normCDF(-d2) - S * normCDF(-d1);
+}
+
+// Local Fallback Newton-Raphson Solver
+function solveIVLocal(marketPrice, S, K, T, r, optionType) {
+  const safeT = Math.max(T, 1e-6);
+  const sqrtT = Math.sqrt(safeT);
+  const discount = Math.exp(-r * safeT);
+  const intrinsic =
+    optionType === "call"
+      ? Math.max(S - K * discount, 0)
+      : Math.max(K * discount - S, 0);
+
+  if (marketPrice <= intrinsic) {
+    throw new Error(`Price must exceed intrinsic value ($${intrinsic.toFixed(2)})`);
+  }
+
+  let sigma = 0.3;
+  for (let i = 1; i <= 100; i++) {
+    const theo = bsPriceJS(S, K, safeT, r, sigma, optionType);
+    const diff = theo - marketPrice;
+    if (Math.abs(diff) < 1e-5) {
+      return {
+        impliedVolatility: sigma,
+        iterations: i,
+        converged: true,
+        pricingError: Math.abs(diff),
+      };
+    }
+    const d1 =
+      (Math.log(S / K) + (r + 0.5 * sigma * sigma) * safeT) / (sigma * sqrtT);
+    const rawVega = S * normPDF(d1) * sqrtT;
+    if (rawVega < 1e-8) break;
+    sigma = Math.max(0.01, Math.min(sigma - diff / rawVega, 5.0));
+  }
+  return {
+    impliedVolatility: sigma,
+    iterations: 100,
+    converged: false,
+    pricingError: Math.abs(bsPriceJS(S, K, safeT, r, sigma, optionType) - marketPrice),
+  };
+}
+
 function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
   const safeT = Math.max(T, 1e-6);
   const sqrtT = Math.sqrt(safeT);
@@ -67,10 +119,11 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
     (Math.log(S / K) + (r + 0.5 * sigma * sigma) * safeT) / (sigma * sqrtT);
   const d2 = d1 - sigma * sqrtT;
   const isCall = optionType === "call";
+  const discount = Math.exp(-r * safeT);
 
   const bsPrice = isCall
-    ? S * normCDF(d1) - K * Math.exp(-r * safeT) * normCDF(d2)
-    : K * Math.exp(-r * safeT) * normCDF(-d2) - S * normCDF(-d1);
+    ? S * normCDF(d1) - K * discount * normCDF(d2)
+    : K * discount * normCDF(-d2) - S * normCDF(-d1);
 
   const delta = isCall ? normCDF(d1) : normCDF(d1) - 1.0;
   const gamma = normPDF(d1) / (S * sigma * sqrtT);
@@ -78,22 +131,21 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
   const theta =
     isCall
       ? (-(S * normPDF(d1) * sigma) / (2 * sqrtT) -
-          r * K * Math.exp(-r * safeT) * normCDF(d2)) /
+          r * K * discount * normCDF(d2)) /
         365.0
       : (-(S * normPDF(d1) * sigma) / (2 * sqrtT) +
-          r * K * Math.exp(-r * safeT) * normCDF(-d2)) /
+          r * K * discount * normCDF(-d2)) /
         365.0;
   const rho =
     isCall
-      ? (K * safeT * Math.exp(-r * safeT) * normCDF(d2)) / 100.0
-      : (-K * safeT * Math.exp(-r * safeT) * normCDF(-d2)) / 100.0;
+      ? (K * safeT * discount * normCDF(d2)) / 100.0
+      : (-K * safeT * discount * normCDF(-d2)) / 100.0;
 
   const probITM = (isCall ? normCDF(d2) : normCDF(-d2)) * 100;
 
   const nSims = Math.min(Math.max(simulations, 500), 50000);
   let sumPayoffs = 0;
   let sumSqPayoffs = 0;
-  const discount = Math.exp(-r * safeT);
 
   for (let i = 0; i < nSims; i++) {
     const u1 = Math.random() || 1e-10;
@@ -136,6 +188,30 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
     });
   }
 
+  // Phase 3: Multi-Tenor Volatility Smile & Skew Curve across Strikes
+  const smileCurve = [];
+  const minStrike = Math.max(10, Math.round(S * 0.7));
+  const maxStrike = Math.round(S * 1.3);
+  const kStep = Math.max(1, Math.round((maxStrike - minStrike) / 25));
+
+  for (let kPt = minStrike; kPt <= maxStrike; kPt += kStep) {
+    // Log-moneyness m = ln(K / S)
+    const m = Math.log(kPt / S);
+    // Institutional Equity Skew + Smile Convexity parameterization across 3 tenors
+    const baseVol = sigma * 100;
+    const iv30d = Math.max(5, baseVol * (1 - 0.38 * m + 1.85 * m * m));
+    const iv60d = Math.max(5, baseVol * (1 - 0.28 * m + 1.25 * m * m));
+    const iv180d = Math.max(5, baseVol * (1 - 0.18 * m + 0.75 * m * m));
+
+    smileCurve.push({
+      strike: kPt,
+      iv30d: Number(iv30d.toFixed(2)),
+      iv60d: Number(iv60d.toFixed(2)),
+      iv180d: Number(iv180d.toFixed(2)),
+      flatBSVol: Number(baseVol.toFixed(2)),
+    });
+  }
+
   return {
     blackScholesPrice: bsPrice,
     monteCarloPrice: mcPrice,
@@ -151,6 +227,7 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
     theta,
     rho,
     payoffCurve,
+    smileCurve,
   };
 }
 
@@ -341,6 +418,12 @@ export default function App() {
   const [optionType, setOptionType] = useState("call");
   const [mcSimulations, setMcSimulations] = useState(25000);
 
+  // --- Phase 3: Implied Volatility Newton-Raphson Solver State ---
+  const [targetMarketPrice, setTargetMarketPrice] = useState(4.5);
+  const [ivResult, setIvResult] = useState(null);
+  const [ivError, setIvError] = useState(null);
+  const [ivLoading, setIvLoading] = useState(false);
+
   // --- Backend Connection State ---
   const [useLiveBackend, setUseLiveBackend] = useState(true);
   const [apiUrl] = useState(
@@ -355,7 +438,7 @@ export default function App() {
   const volDecimal = volatility / 100;
   const rateDecimal = riskFreeRate / 100;
 
-  // --- Phase 2 Function: Fetch Live Stock Price & Historical Volatility ---
+  // --- Phase 2: Fetch Live Stock Price & Historical Volatility ---
   const handleFetchMarketTicker = async (symbolToFetch) => {
     const sym = (symbolToFetch || tickerInput).trim().toUpperCase();
     if (!sym) return;
@@ -382,12 +465,10 @@ export default function App() {
         setActiveTicker({
           ticker: data.ticker,
           spotPrice: data.spotPrice,
-          volPct: (data.annualizedVolatility * 100).toFixed(1),
+          volPct: Number((data.annualizedVolatility * 100).toFixed(1)),
           days: data.tradingDaysSampled,
-          source: "Yahoo Finance (Live)",
         });
       } else {
-        // Offline Sandbox fallback
         const fallback = SANDBOX_TICKERS[sym] || {
           spotPrice: 150.0,
           annualizedVolatility: 0.3,
@@ -400,15 +481,60 @@ export default function App() {
         setActiveTicker({
           ticker: sym,
           spotPrice: fallback.spotPrice,
-          volPct: (fallback.annualizedVolatility * 100).toFixed(1),
+          volPct: Number((fallback.annualizedVolatility * 100).toFixed(1)),
           days: fallback.tradingDaysSampled,
-          source: "Sandbox Preset",
         });
       }
     } catch (err) {
       setTickerError(`Could not load '${sym}' — check ticker or backend.`);
     } finally {
       setTickerLoading(false);
+    }
+  };
+
+  // --- Phase 3: Solve Implied Volatility via Newton-Raphson ---
+  const handleSolveImpliedVol = async (e) => {
+    if (e) e.preventDefault();
+    setIvLoading(true);
+    setIvError(null);
+
+    const baseGatewayUrl = apiUrl.replace(/\/price$/, "");
+    try {
+      if (useLiveBackend) {
+        const res = await fetch(`${baseGatewayUrl}/implied-vol`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            marketPrice: Number(targetMarketPrice),
+            spotPrice: Number(spotPrice),
+            strikePrice: Number(strikePrice),
+            timeToExpiry: Number(timeInYears),
+            riskFreeRate: Number(rateDecimal),
+            optionType,
+          }),
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || "IV Solver rejected input");
+        }
+        const data = await res.json();
+        setIvResult(data);
+      } else {
+        const localIv = solveIVLocal(
+          Number(targetMarketPrice),
+          Number(spotPrice),
+          Number(strikePrice),
+          Number(timeInYears),
+          Number(rateDecimal),
+          optionType
+        );
+        setIvResult(localIv);
+      }
+    } catch (err) {
+      setIvError(err.message || "Failed to solve Implied Volatility");
+      setIvResult(null);
+    } finally {
+      setIvLoading(false);
     }
   };
 
@@ -564,7 +690,7 @@ export default function App() {
                 QUANTDESK
               </span>
               <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                PHASE 2 // YFINANCE LIVE FEED
+                PHASE 3 // NEWTON-RAPHSON IV & VOL SURFACE
               </span>
             </div>
 
@@ -646,7 +772,7 @@ export default function App() {
 
       {/* Main Workstation Container */}
       <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* LEFT PANEL: Live Market Feed + Order Ticket */}
+        {/* LEFT PANEL: Live Market Feed + Order Ticket + Phase 3 IV Solver */}
         <aside
           className={`${
             uiMode === "pro" ? "lg:col-span-3" : "lg:col-span-4"
@@ -695,7 +821,6 @@ export default function App() {
                 </button>
               </form>
 
-              {/* Quick Ticker Pills */}
               <div className="flex flex-wrap gap-1">
                 {["SPY", "NVDA", "AAPL", "TSLA", "MSFT"].map((sym) => (
                   <button
@@ -719,6 +844,103 @@ export default function App() {
                 <div className="text-[11px] font-mono text-zinc-400 border-t border-zinc-800/80 pt-2 flex justify-between">
                   <span>1Y Realized Vol: {activeTicker.volPct}%</span>
                   <span>({activeTicker.days}d sampled)</span>
+                </div>
+              )}
+            </div>
+
+            {/* PHASE 3: NEWTON-RAPHSON IMPLIED VOLATILITY SOLVER */}
+            <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                  <Compass className="w-3.5 h-3.5" />
+                  Implied Vol Solver (Newton)
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setTargetMarketPrice(
+                      Number(active.blackScholesPrice.toFixed(2))
+                    )
+                  }
+                  className="text-[10px] font-mono text-zinc-400 hover:text-zinc-200 underline cursor-pointer"
+                >
+                  Use Theo (${active.blackScholesPrice.toFixed(2)})
+                </button>
+              </div>
+
+              <form onSubmit={handleSolveImpliedVol} className="flex gap-1.5">
+                <div className="flex-1 flex items-center bg-[#111114] border border-zinc-800 rounded px-2.5 py-1">
+                  <span className="text-xs font-mono text-zinc-500 mr-1">$</span>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="0.01"
+                    value={targetMarketPrice}
+                    onChange={(e) => setTargetMarketPrice(e.target.value)}
+                    placeholder="Market Option Price"
+                    className="w-full bg-transparent text-xs font-mono text-white focus:outline-none tabular-nums"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={ivLoading}
+                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-semibold text-xs transition cursor-pointer"
+                >
+                  {ivLoading ? "..." : "Solve IV"}
+                </button>
+              </form>
+
+              {ivError && (
+                <div className="text-[11px] font-mono text-rose-400">
+                  {ivError}
+                </div>
+              )}
+
+              {ivResult && !ivError && (
+                <div className="border-t border-zinc-800 pt-2 space-y-1.5 text-[11px] font-mono">
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-400">Solved Implied Vol:</span>
+                    <span className="text-emerald-400 font-bold text-sm">
+                      {(ivResult.impliedVolatility * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-zinc-500">
+                    <span>Newton Iterations: {ivResult.iterations}</span>
+                    <span>Err: ${ivResult.pricingError.toFixed(5)}</span>
+                  </div>
+                  {activeTicker && (
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="text-zinc-400">vs. Realized Vol:</span>
+                      <span
+                        className={
+                          ivResult.impliedVolatility * 100 > activeTicker.volPct
+                            ? "text-amber-400 font-semibold"
+                            : "text-cyan-400 font-semibold"
+                        }
+                      >
+                        {ivResult.impliedVolatility * 100 > activeTicker.volPct
+                          ? "EXPENSIVE (IV > HV)"
+                          : "CHEAP (IV < HV)"}
+                      </span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setVolatility(
+                        Number(
+                          Math.min(
+                            150,
+                            Math.max(2, ivResult.impliedVolatility * 100)
+                          ).toFixed(1)
+                        )
+                      )
+                    }
+                    className="w-full mt-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-amber-400 text-[11px] font-mono cursor-pointer"
+                  >
+                    Apply {(ivResult.impliedVolatility * 100).toFixed(1)}% IV to
+                    Sliders →
+                  </button>
                 </div>
               )}
             </div>
@@ -760,7 +982,7 @@ export default function App() {
             </div>
 
             {/* Parameter Inputs */}
-            <div className="space-y-3.5">
+            <div className="space-y-3">
               {[
                 {
                   label: "Underlying Spot (S)",
@@ -1061,7 +1283,7 @@ export default function App() {
           {/* MULTI-TAB VISUALIZATION WORKSTATION */}
           <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   onClick={() => setActiveTab("spaghetti")}
                   className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
@@ -1070,7 +1292,7 @@ export default function App() {
                       : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
                   }`}
                 >
-                  1. Monte Carlo Asset Paths (Spaghetti)
+                  1. Monte Carlo Paths
                 </button>
                 <button
                   onClick={() => setActiveTab("payoff")}
@@ -1080,7 +1302,17 @@ export default function App() {
                       : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
                   }`}
                 >
-                  2. Payoff & Valuation Curve
+                  2. Payoff Diagram
+                </button>
+                <button
+                  onClick={() => setActiveTab("smile")}
+                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
+                    activeTab === "smile"
+                      ? "bg-amber-500 text-zinc-950 font-semibold"
+                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                  }`}
+                >
+                  3. Volatility Smile & Term Surface
                 </button>
                 {uiMode === "pro" && (
                   <button
@@ -1091,7 +1323,7 @@ export default function App() {
                         : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
                     }`}
                   >
-                    3. Delta / Gamma Surface
+                    4. Delta / Gamma Curve
                   </button>
                 )}
               </div>
@@ -1220,6 +1452,97 @@ export default function App() {
                     />
                   </LineChart>
                 </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* TAB 3: PHASE 3 VOLATILITY SMILE & MULTI-TENOR SURFACE */}
+            {activeTab === "smile" && (
+              <div>
+                <div className="h-[320px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={localAnalytics.smileCurve}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                      <XAxis
+                        dataKey="strike"
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `$${v}`}
+                      />
+                      <YAxis
+                        stroke="#71717a"
+                        domain={["auto", "auto"]}
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#09090b",
+                          borderColor: "#27272a",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Legend
+                        wrapperStyle={{
+                          fontFamily: "monospace",
+                          fontSize: "11px",
+                        }}
+                      />
+                      <ReferenceLine
+                        x={spotPrice}
+                        stroke="#10b981"
+                        strokeDasharray="3 3"
+                        label={{
+                          value: `ATM Spot $${spotPrice}`,
+                          fill: "#10b981",
+                          fontSize: 11,
+                        }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="iv30d"
+                        name="30d Tenor IV Skew (%)"
+                        stroke="#f59e0b"
+                        strokeWidth={2.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="iv60d"
+                        name="60d Tenor IV Skew (%)"
+                        stroke="#10b981"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="iv180d"
+                        name="180d Tenor IV Skew (%)"
+                        stroke="#6366f1"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="flatBSVol"
+                        name="Flat Black-Scholes Assumption"
+                        stroke="#52525b"
+                        strokeWidth={1.5}
+                        strokeDasharray="4 4"
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-2 text-[11px] font-mono text-zinc-500 flex justify-between">
+                  <span>
+                    Left Wing (Low Strikes): Crash-protection Put Skew | Right
+                    Wing: OTM Call Convexity
+                  </span>
+                  <span className="text-amber-400">
+                    Short-dated (30d) smile exhibits steeper curvature than 180d
+                  </span>
+                </div>
               </div>
             )}
 

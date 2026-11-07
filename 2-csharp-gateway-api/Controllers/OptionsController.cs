@@ -68,5 +68,29 @@ namespace QuantGateway.Controllers
             var marketQuote = await response.Content.ReadFromJsonAsync<MarketQuoteResponse>();
             return Ok(marketQuote);
         }
+
+        [HttpPost("implied-vol")]
+        public async Task<IActionResult> SolveImpliedVolatility([FromBody] ImpliedVolRequest request)
+        {
+            string pythonIvUrl = Environment.GetEnvironmentVariable("PYTHON_IV_URL") 
+                                 ?? "http://127.0.0.1:8000/implied-vol";
+            string apiKey = Environment.GetEnvironmentVariable("INTERNAL_API_KEY") 
+                            ?? "quant_desk_dev_secret_2026";
+
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Post, pythonIvUrl);
+            httpRequest.Headers.Add("X-Internal-Api-Key", apiKey);
+            httpRequest.Content = JsonContent.Create(request);
+
+            var response = await _httpClient.SendAsync(httpRequest);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorText = await response.Content.ReadAsStringAsync();
+                return StatusCode((int)response.StatusCode, $"IV Solver Error: {errorText}");
+            }
+
+            var ivResult = await response.Content.ReadFromJsonAsync<ImpliedVolResponse>();
+            return Ok(ivResult);
+        }
     }
 }
