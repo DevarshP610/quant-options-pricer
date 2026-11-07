@@ -155,6 +155,72 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
         "tradingDaysSampled": int(len(log_returns)),
     }
 
+def solve_implied_volatility(
+    market_price: float,
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    option_type: str,
+    max_iterations: int = 100,
+    tolerance: float = 1e-5,
+) -> dict[str, Any]:
+    """Solve for Implied Volatility (sigma) using the Newton-Raphson root-finding algorithm."""
+    safe_T = max(T, 1e-6)
+    sqrt_T = np.sqrt(safe_T)
+    is_call = option_type.lower() == "call"
+
+    # Minimum possible intrinsic value (discounted)
+    discount = np.exp(-r * safe_T)
+    intrinsic = max(S - K * discount, 0.0) if is_call else max(K * discount - S, 0.0)
+    if market_price <= intrinsic:
+        raise ValueError(
+            f"Market price (${market_price:.2f}) is below intrinsic value (${intrinsic:.2f})."
+        )
+
+    # Start with a 30% volatility initial guess
+    sigma = 0.30
+
+    for iteration in range(1, max_iterations + 1):
+        theo_price = black_scholes_price_only(S,K, safe_T, r, sigma, option_type)
+
+        # Calculate how far our guess is from the real market price
+        price_diff = theo_price - market_price
+
+        # Check if we are within $0.00001 (tolerance) of the target price!
+        if abs(price_diff) < tolerance:
+            return {
+                "impliedVolatility": round(float(sigma), 6),
+                "iterations": iteration,
+                "converged": True,
+                "pricingError": round(float(abs(price_diff)), 6),
+            }
+
+        # Calculate Raw Vega (dV / d_sigma) to steer our next guess
+        d1, _ = calculate_d1_d2(S, K, safe_T, r, sigma)
+        raw_vega = S * norm.pdf(d1) * sqrt_T
+
+        # Guard against tiny Vega far out-of-the-money so we never divide by zero
+        if raw_vega < 1e-8:
+            break
+
+        # TODO 2: Apply Newton-Raphson formula: sigma = sigma - (price_diff / raw_vega)
+        sigma = sigma - (price_diff / raw_vega)
+
+        # TODO 3: Clamp sigma between 0.01 (1%) and 5.0 (500%) using:
+        #         max(0.01, min(sigma, 5.0))
+        sigma = max(0.01, min (sigma, 5.0))
+
+    return {
+        "impliedVolatility": round(float(sigma), 6),
+        "iterations": max_iterations,
+        "converged": False,
+        "pricingError": round(
+            float(abs(black_scholes_price_only(S, K, safe_T, r, sigma, option_type) - market_price)),
+            6,
+        ),
+    }
+
 
 if __name__ == "__main__":
     print("BS Call:", black_scholes_price_only(100, 100, 1.0, 0.05, 0.20, "call"))

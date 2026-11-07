@@ -4,8 +4,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
 
-from pricer import black_scholes_all, monte_carlo_price, get_live_market_data
-
+from pricer import black_scholes_all, monte_carlo_price, get_live_market_data, solve_implied_volatility
 load_dotenv()
 PORT = int(os.getenv("PORT", 8000))
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -23,6 +22,14 @@ class OptionInput(BaseModel):
     volatility: float = Field(gt=0)
     optionType: str = "call"
     simulations: int = Field(default=10000, ge=100)
+
+class ImpliedVolInput(BaseModel):
+    marketPrice: float = Field(gt=0)
+    spotPrice: float = Field(gt=0)
+    strikePrice: float = Field(gt=0)
+    timeToExpiry: float = Field(gt=0)
+    riskFreeRate: float
+    optionType: str = "call"
 
 
 def verify_internal_key(api_key: str | None) -> None:
@@ -85,6 +92,9 @@ def calculate_option(
         "payoffCurve": bs["payoffCurve"],
     }
 
+
+@app.post("/implied/vol")
+def calculate_implied_vol(data: ImpliedVolInput, x_internal_api_key: str | None = Header(default = None))
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=HOST, port=PORT, reload=True)
