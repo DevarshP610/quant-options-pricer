@@ -221,8 +221,73 @@ def solve_implied_volatility(
         ),
     }
 
+def binomial_american_price(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    option_type: str,
+    steps: int = 100,
+) -> dict[str, float]:
+    """Price an American option using a vectorized Cox-Ross-Rubinstein (CRR) Binomial Tree."""
+    safe_T = max(T, 1e-6)
+    dt = safe_T / steps
+    is_call = option_type.lower() == "call"
+
+    # 1. Up factor (u), Down factor (d), and per-step discount factor
+    u = float(np.exp(sigma * np.sqrt(dt)))
+    d = 1.0 / u
+    step_discount = float(np.exp(-r * dt))
+
+    # 2. Risk-neutral probability of an Up move (p)
+    p = float((np.exp(r * dt) - d) / (u - d))
+    p = max(0.0, min(1.0, p))
+
+    # 3. Calculate all (steps + 1) stock prices at expiration (step N)
+    j = np.arange(steps + 1)
+    spot_at_expiry = S * (u ** (steps - j)) * (d ** j)
+
+    # 4. Option values at expiration
+    if is_call:
+        option_values = np.maximum(spot_at_expiry - K, 0.0)
+    else:
+        option_values = np.maximum(K - spot_at_expiry, 0.0)
+
+    # 5. Backward Induction: walk backwards from (steps - 1) down to 0
+    for step in range(steps - 1, -1, -1):
+        # TODO 1 COMPLETED: Discounted probability-weighted average of Up & Down branches
+        hold_values = step_discount * (
+            p * option_values[:-1] + (1.0 - p) * option_values[1:]
+        )
+
+        # Calculate the stock prices at this intermediate time step
+        k_idx = np.arange(step + 1)
+        spot_at_step = S * (u ** (step - k_idx)) * (d ** k_idx)
+
+        # Calculate immediate Early Exercise payoff at this step
+        if is_call:
+            exercise_values = np.maximum(spot_at_step - K, 0.0)
+        else:
+            exercise_values = np.maximum(K - spot_at_step, 0.0)
+
+        # TODO 2 COMPLETED: American Option Rule — pick max(Hold Value, Exercise Value)
+        option_values = np.maximum(hold_values, exercise_values)
+
+    american_price = float(option_values[0])
+    european_price = black_scholes_price_only(S, K, safe_T, r, sigma, option_type)
+
+    # TODO 3 COMPLETED: Early Exercise Premium (American minus European)
+    early_exercise_premium = max(0.0, american_price - european_price)
+
+    return {
+        "americanPrice": round(american_price, 4),
+        "europeanPrice": round(european_price, 4),
+        "earlyExercisePremium": round(float(early_exercise_premium), 4),
+    }
 
 if __name__ == "__main__":
     print("BS Call:", black_scholes_price_only(100, 100, 1.0, 0.05, 0.20, "call"))
     print("MC Call:", monte_carlo_price(100, 100, 1.0, 0.05, 0.20, "call", 50000))
     print("NVDA Live Feed:", get_live_market_data("NVDA"))
+    print("Solved IV:", solve_implied_volatility(10.45058, 100, 100, 1.0, 0.05, "call"))

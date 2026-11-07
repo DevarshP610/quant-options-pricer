@@ -4,7 +4,13 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
 
-from pricer import black_scholes_all, monte_carlo_price, get_live_market_data, solve_implied_volatility
+from pricer import (
+    black_scholes_all,
+    monte_carlo_price,
+    get_live_market_data,
+    solve_implied_volatility,
+    binomial_american_price,
+)
 load_dotenv()
 PORT = int(os.getenv("PORT", 8000))
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -80,6 +86,29 @@ def calculate_option(
         option_type=data.optionType,
         simulations=safe_sims,
     )
+
+    amr = binomial_american_price(
+        S=data.spotPrice,
+        K=data.strikePrice,
+        T=data.timeToExpiry,
+        r=data.riskFreeRate,
+        sigma=data.volatility,
+        option_type=data.optionType,
+        steps=100,
+    )
+
+    return {
+        "blackScholesPrice": bs["price"],
+        "monteCarloPrice": mc_price,
+        "americanPrice": amr["americanPrice"],
+        "earlyExercisePremium": amr["earlyExercisePremium"],
+        "delta": bs["delta"],
+        "gamma": bs["gamma"],
+        "vega": bs["vega"],
+        "theta": bs["theta"],
+        "rho": bs["rho"],
+        "payoffCurve": bs["payoffCurve"],
+    }
 
     return {
         "blackScholesPrice": bs["price"],
