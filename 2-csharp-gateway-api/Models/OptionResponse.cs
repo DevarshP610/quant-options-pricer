@@ -14,6 +14,8 @@ namespace QuantGateway.Models
     {
         public double BlackScholesPrice { get; set; }
         public double MonteCarloPrice { get; set; }
+        public double AmericanPrice { get; set; }
+        public double EarlyExercisePremium { get; set; }
         public double Delta { get; set; }
         public double Gamma { get; set; }
         public double Vega { get; set; }
