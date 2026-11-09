@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
+from backtester import run_sma_backtest
 
 from pricer import (
     black_scholes_all,
@@ -37,6 +38,12 @@ class ImpliedVolInput(BaseModel):
     riskFreeRate: float
     optionType: str = "call"
 
+class BacktestInput(BaseModel):
+    ticker: str = "NVDA"
+    fastWindow: int = Field(default=20, ge=2, le=200)
+    slowWindow: int = Field(default=50, ge=5, le=400)
+    initialCapital: float = Field(default=10000.0, gt=0)
+    period: str = "2y"
 
 def verify_internal_key(api_key: str | None) -> None:
     """Validate internal gateway API key if provided in headers."""
@@ -137,6 +144,22 @@ def calculate_implied_vol(data: ImpliedVolInput, x_internal_api_key: str | None 
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
         
+@app.post("/backtest")
+def execute_backtest(
+    data: BacktestInput,
+    x_internal_api_key: str | None = Header(default=None),
+):
+    verify_internal_key(x_internal_api_key)
+    try:
+        return run_sma_backtest(
+            ticker=data.ticker,
+            fast_window=data.fastWindow,
+            slow_window=data.slowWindow,
+            initial_capital=data.initialCapital,
+            period=data.period,
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=HOST, port=PORT, reload=True)

@@ -92,5 +92,29 @@ namespace QuantGateway.Controllers
             var ivResult = await response.Content.ReadFromJsonAsync<ImpliedVolResponse>();
             return Ok(ivResult);
         }
+
+        [HttpPost("backtest")]
+     public async Task<IActionResult> RunBacktest([FromBody] BacktestRequest request)
+     {
+         string pythonBtUrl = Environment.GetEnvironmentVariable("PYTHON_BACKTEST_URL") 
+                              ?? "http://127.0.0.1:8000/backtest";
+         string apiKey = Environment.GetEnvironmentVariable("INTERNAL_API_KEY") 
+                         ?? "quant_desk_dev_secret_2026";
+
+         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, pythonBtUrl);
+         httpRequest.Headers.Add("X-Internal-Api-Key", apiKey);
+         httpRequest.Content = JsonContent.Create(request);
+
+         var response = await _httpClient.SendAsync(httpRequest);
+
+         if (!response.IsSuccessStatusCode)
+         {
+             var errorText = await response.Content.ReadAsStringAsync();
+             return StatusCode((int)response.StatusCode, $"Backtest Engine Error: {errorText}");
+         }
+
+         var btResult = await response.Content.ReadFromJsonAsync<BacktestResponse>();
+         return Ok(btResult);
+     }
     }
 }

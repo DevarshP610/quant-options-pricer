@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LineChart,
   Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -27,6 +29,9 @@ import {
   Search,
   Radio,
   Compass,
+  BarChart3,
+  Activity,
+  Play,
 } from "lucide-react";
 
 const PATH_COLORS = [
@@ -37,7 +42,7 @@ const PATH_COLORS = [
 
 const SANDBOX_TICKERS = {
   SPY: { spotPrice: 582.4, annualizedVolatility: 0.145, suggestedStrike: 580, tradingDaysSampled: 252 },
-  NVDA: { spotPrice: 138.6, annualizedVolatility: 0.485, suggestedStrike: 140, tradingDaysSampled: 252 },
+  NVDA: { spotPrice: 186.64, annualizedVolatility: 0.384, suggestedStrike: 185, tradingDaysSampled: 250 },
   AAPL: { spotPrice: 231.2, annualizedVolatility: 0.224, suggestedStrike: 230, tradingDaysSampled: 252 },
   TSLA: { spotPrice: 254.8, annualizedVolatility: 0.562, suggestedStrike: 255, tradingDaysSampled: 252 },
   MSFT: { spotPrice: 428.5, annualizedVolatility: 0.215, suggestedStrike: 430, tradingDaysSampled: 252 },
@@ -72,7 +77,6 @@ function bsPriceJS(S, K, T, r, sigma, optionType) {
     : K * discount * normCDF(-d2) - S * normCDF(-d1);
 }
 
-// Local Fallback Newton-Raphson Solver
 function solveIVLocal(marketPrice, S, K, T, r, optionType) {
   const safeT = Math.max(T, 1e-6);
   const sqrtT = Math.sqrt(safeT);
@@ -109,6 +113,96 @@ function solveIVLocal(marketPrice, S, K, T, r, optionType) {
     iterations: 100,
     converged: false,
     pricingError: Math.abs(bsPriceJS(S, K, safeT, r, sigma, optionType) - marketPrice),
+  };
+}
+
+// Local Fallback Backtest Generator (when Sandbox Mode is active)
+function generateLocalBacktest(ticker, fastWindow, slowWindow, initialCapital) {
+  const days = 350;
+  const prices = [100];
+  let seed = ticker.charCodeAt(0) * 17 + fastWindow;
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed - 1) / 2147483646;
+  };
+
+  for (let i = 1; i < days; i++) {
+    const z = (rand() + rand() + rand() - 1.5) * 1.6;
+    prices.push(prices[i - 1] * Math.exp(0.0007 + 0.021 * z));
+  }
+
+  let stratEq = initialCapital;
+  let bhEq = initialCapital;
+  let peak = initialCapital;
+  let maxDD = 0;
+  let wins = 0;
+  let activeDays = 0;
+  let trades = 0;
+  let prevPos = 0;
+  const stratReturns = [];
+  const curve = [];
+
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+
+  for (let i = slowWindow; i < days; i++) {
+    const fastSlice = prices.slice(i - fastWindow + 1, i + 1);
+    const slowSlice = prices.slice(i - slowWindow + 1, i + 1);
+    const fastSma = fastSlice.reduce((a, b) => a + b, 0) / fastWindow;
+    const slowSma = slowSlice.reduce((a, b) => a + b, 0) / slowWindow;
+
+    const mktRet = (prices[i] - prices[i - 1]) / prices[i - 1];
+    const stratRet = prevPos * mktRet;
+    stratReturns.push(stratRet);
+
+    bhEq *= 1 + mktRet;
+    stratEq *= 1 + stratRet;
+    if (stratEq > peak) peak = stratEq;
+    const dd = ((stratEq - peak) / peak) * 100;
+    if (dd < maxDD) maxDD = dd;
+
+    if (prevPos === 1) {
+      activeDays++;
+      if (stratRet > 0) wins++;
+    }
+
+    const signal = fastSma > slowSma ? 1 : 0;
+    if (signal === 1 && prevPos === 0) trades++;
+    prevPos = signal;
+
+    if (i % 2 === 0) {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      curve.push({
+        date: d.toISOString().slice(0, 10),
+        spot: Number(prices[i].toFixed(2)),
+        fastSma: Number(fastSma.toFixed(2)),
+        slowSma: Number(slowSma.toFixed(2)),
+        strategyEquity: Number(stratEq.toFixed(2)),
+        buyHoldEquity: Number(bhEq.toFixed(2)),
+        drawdownPct: Number(dd.toFixed(2)),
+      });
+    }
+  }
+
+  const meanRet = stratReturns.reduce((a, b) => a + b, 0) / stratReturns.length;
+  const variance =
+    stratReturns.reduce((a, b) => a + (b - meanRet) ** 2, 0) /
+    (stratReturns.length - 1);
+  const sharpe =
+    variance > 0 ? (meanRet / Math.sqrt(variance)) * Math.sqrt(252) : 0;
+
+  return {
+    ticker,
+    totalReturnPct: Number((((stratEq - initialCapital) / initialCapital) * 100).toFixed(2)),
+    buyHoldReturnPct: Number((((bhEq - initialCapital) / initialCapital) * 100).toFixed(2)),
+    finalEquity: Number(stratEq.toFixed(2)),
+    finalBuyHoldEquity: Number(bhEq.toFixed(2)),
+    sharpeRatio: Number(sharpe.toFixed(2)),
+    maxDrawdownPct: Number(maxDD.toFixed(2)),
+    winRatePct: activeDays > 0 ? Number(((wins / activeDays) * 100).toFixed(1)) : 0,
+    totalTrades: trades,
+    equityCurve: curve,
   };
 }
 
@@ -188,16 +282,13 @@ function computeQuantAnalytics(S, K, T, r, sigma, optionType, simulations) {
     });
   }
 
-  // Phase 3: Multi-Tenor Volatility Smile & Skew Curve across Strikes
   const smileCurve = [];
   const minStrike = Math.max(10, Math.round(S * 0.7));
   const maxStrike = Math.round(S * 1.3);
   const kStep = Math.max(1, Math.round((maxStrike - minStrike) / 25));
 
   for (let kPt = minStrike; kPt <= maxStrike; kPt += kStep) {
-    // Log-moneyness m = ln(K / S)
     const m = Math.log(kPt / S);
-    // Institutional Equity Skew + Smile Convexity parameterization across 3 tenors
     const baseVol = sigma * 100;
     const iv30d = Math.max(5, baseVol * (1 - 0.38 * m + 1.85 * m * m));
     const iv60d = Math.max(5, baseVol * (1 - 0.28 * m + 1.25 * m * m));
@@ -397,6 +488,9 @@ function MonteCarloSpaghettiCanvas({
 }
 
 export default function App() {
+  // --- Top-Level Module Switcher: "options" (Module 1) vs "backtest" (Module 2) ---
+  const [activeModule, setActiveModule] = useState("options");
+
   const [uiMode, setUiMode] = useState("pro");
   const [activeTab, setActiveTab] = useState("spaghetti");
   const [whitePaperPlot, setWhitePaperPlot] = useState(false);
@@ -424,6 +518,19 @@ export default function App() {
   const [ivError, setIvError] = useState(null);
   const [ivLoading, setIvLoading] = useState(false);
 
+  // --- Module 2: Strategy Backtester State ---
+  const [btTicker, setBtTicker] = useState("NVDA");
+  const [fastWindow, setFastWindow] = useState(20);
+  const [slowWindow, setSlowWindow] = useState(50);
+  const [initialCapital, setInitialCapital] = useState(10000);
+  const [btPeriod, setBtPeriod] = useState("2y");
+  const [btData, setBtData] = useState(() =>
+    generateLocalBacktest("NVDA", 20, 50, 10000)
+  );
+  const [btLoading, setBtLoading] = useState(false);
+  const [btError, setBtError] = useState(null);
+  const [btChartTab, setBtChartTab] = useState("equity"); // "equity" | "drawdown" | "signals"
+
   // --- Backend Connection State ---
   const [useLiveBackend, setUseLiveBackend] = useState(true);
   const [apiUrl] = useState(
@@ -438,7 +545,7 @@ export default function App() {
   const volDecimal = volatility / 100;
   const rateDecimal = riskFreeRate / 100;
 
-  // --- Phase 2: Fetch Live Stock Price & Historical Volatility ---
+  // --- Fetch Live Stock Price & Historical Volatility ---
   const handleFetchMarketTicker = async (symbolToFetch) => {
     const sym = (symbolToFetch || tickerInput).trim().toUpperCase();
     if (!sym) return;
@@ -492,7 +599,7 @@ export default function App() {
     }
   };
 
-  // --- Phase 3: Solve Implied Volatility via Newton-Raphson ---
+  // --- Solve Implied Volatility via Newton-Raphson ---
   const handleSolveImpliedVol = async (e) => {
     if (e) e.preventDefault();
     setIvLoading(true);
@@ -535,6 +642,67 @@ export default function App() {
       setIvResult(null);
     } finally {
       setIvLoading(false);
+    }
+  };
+
+  // --- Module 2: Run SMA Strategy Backtest ---
+  const handleRunBacktest = async (overrideTicker) => {
+    const sym = (overrideTicker || btTicker).trim().toUpperCase();
+    if (!sym) return;
+    setBtTicker(sym);
+    setBtLoading(true);
+    setBtError(null);
+
+    if (Number(fastWindow) >= Number(slowWindow)) {
+      setBtError("Fast SMA Window must be smaller than Slow SMA Window.");
+      setBtLoading(false);
+      return;
+    }
+
+    const baseGatewayUrl = apiUrl.replace(/\/price$/, "");
+    try {
+      if (useLiveBackend) {
+        const res = await fetch(`${baseGatewayUrl}/backtest`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ticker: sym,
+            fastWindow: Number(fastWindow),
+            slowWindow: Number(slowWindow),
+            initialCapital: Number(initialCapital),
+            period: btPeriod,
+          }),
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || "Backtest request failed");
+        }
+        const json = await res.json();
+        setBtData(json);
+      } else {
+        setBtData(
+          generateLocalBacktest(
+            sym,
+            Number(fastWindow),
+            Number(slowWindow),
+            Number(initialCapital)
+          )
+        );
+      }
+    } catch (err) {
+      setBtError(
+        `Live API Error (${err.message}) — Showing Sandbox Simulation.`
+      );
+      setBtData(
+        generateLocalBacktest(
+          sym,
+          Number(fastWindow),
+          Number(slowWindow),
+          Number(initialCapital)
+        )
+      );
+    } finally {
+      setBtLoading(false);
     }
   };
 
@@ -678,23 +846,51 @@ export default function App() {
     active.blackScholesPrice,
   ]);
 
+  const strategyAlpha = btData.totalReturnPct - btData.buyHoldReturnPct;
+
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans antialiased">
       {/* Top Institutional Command Bar */}
       <header className="border-b border-zinc-800 bg-[#0c0c0f] px-4 lg:px-6 py-2.5">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <div className="w-2 h-5 bg-amber-500 rounded-xs" />
               <span className="font-mono font-bold tracking-tight text-sm uppercase text-zinc-100">
                 QUANTDESK
               </span>
-              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                PHASE 3 // NEWTON-RAPHSON IV & VOL SURFACE
-              </span>
             </div>
 
-            <div className="hidden md:flex items-center gap-2 text-xs font-mono border-l border-zinc-800 pl-4">
+            {/* MODULE NAVIGATION SWITCHER */}
+            <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs font-mono">
+              <button
+                onClick={() => setActiveModule("options")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-semibold transition cursor-pointer ${
+                  activeModule === "options"
+                    ? "bg-amber-500 text-zinc-950"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                1. Options Pricer & Greeks
+              </button>
+              <button
+                onClick={() => {
+                  setActiveModule("backtest");
+                  handleRunBacktest(btTicker);
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-semibold transition cursor-pointer ${
+                  activeModule === "backtest"
+                    ? "bg-amber-500 text-zinc-950"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                2. Strategy Backtester
+              </button>
+            </div>
+
+            <div className="hidden xl:flex items-center gap-2 text-xs font-mono border-l border-zinc-800 pl-4">
               {useLiveBackend ? (
                 apiError ? (
                   <span className="flex items-center gap-1.5 text-amber-400">
@@ -720,32 +916,32 @@ export default function App() {
             <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs">
               <button
                 onClick={() => setUiMode("guided")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition cursor-pointer ${
                   uiMode === "guided"
-                    ? "bg-amber-500 text-zinc-950 font-semibold"
+                    ? "bg-zinc-700 text-white font-semibold"
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
                 <BookOpen className="w-3.5 h-3.5" />
-                Guided Mode (Beginner)
+                Guided Mode
               </button>
               <button
                 onClick={() => setUiMode("pro")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xs font-medium transition cursor-pointer ${
                   uiMode === "pro"
-                    ? "bg-amber-500 text-zinc-950 font-semibold"
+                    ? "bg-zinc-700 text-white font-semibold"
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
                 <Terminal className="w-3.5 h-3.5" />
-                Pro Desk (Quant Sim)
+                Pro Desk
               </button>
             </div>
 
             <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800 text-xs font-mono">
               <button
                 onClick={() => setUseLiveBackend(false)}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition ${
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition cursor-pointer ${
                   !useLiveBackend
                     ? "bg-zinc-700 text-white"
                     : "text-zinc-400 hover:text-zinc-200"
@@ -756,7 +952,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => setUseLiveBackend(true)}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition ${
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xs transition cursor-pointer ${
                   useLiveBackend
                     ? "bg-emerald-600 text-white"
                     : "text-zinc-400 hover:text-zinc-200"
@@ -770,594 +966,505 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Workstation Container */}
-      <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* LEFT PANEL: Live Market Feed + Order Ticket + Phase 3 IV Solver */}
-        <aside
-          className={`${
-            uiMode === "pro" ? "lg:col-span-3" : "lg:col-span-4"
-          } bg-[#111114] border border-zinc-800/90 rounded flex flex-col justify-between`}
-        >
-          <div className="p-4 space-y-4">
-            {/* PHASE 2: LIVE MARKET TICKER FEED BOX */}
-            <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-                  <Radio className="w-3.5 h-3.5" />
-                  Live Equity Feed (yfinance)
-                </span>
-                {activeTicker && (
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                    {activeTicker.ticker} ${activeTicker.spotPrice}
+      {/* =====================================================================
+          MODULE 1: OPTIONS PRICER & GREEKS VISUALIZER
+         ===================================================================== */}
+      {activeModule === "options" && (
+        <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <aside
+            className={`${
+              uiMode === "pro" ? "lg:col-span-3" : "lg:col-span-4"
+            } bg-[#111114] border border-zinc-800/90 rounded flex flex-col justify-between`}
+          >
+            <div className="p-4 space-y-4">
+              {/* LIVE MARKET TICKER FEED BOX */}
+              <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                    <Radio className="w-3.5 h-3.5" />
+                    Live Equity Feed (yfinance)
                   </span>
+                  {activeTicker && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                      {activeTicker.ticker} ${activeTicker.spotPrice}
+                    </span>
+                  )}
+                </div>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleFetchMarketTicker(tickerInput);
+                  }}
+                  className="flex gap-1.5"
+                >
+                  <input
+                    type="text"
+                    value={tickerInput}
+                    onChange={(e) =>
+                      setTickerInput(e.target.value.toUpperCase())
+                    }
+                    placeholder="Ticker (e.g. NVDA, SPY)"
+                    className="flex-1 bg-[#111114] border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono text-white uppercase focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={tickerLoading}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-semibold text-xs transition cursor-pointer"
+                  >
+                    {tickerLoading ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Search className="w-3.5 h-3.5" />
+                    )}
+                    Load
+                  </button>
+                </form>
+
+                <div className="flex flex-wrap gap-1">
+                  {["SPY", "NVDA", "AAPL", "TSLA", "MSFT"].map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      onClick={() => handleFetchMarketTicker(sym)}
+                      className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-mono text-zinc-300 cursor-pointer"
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+
+                {tickerError && (
+                  <div className="text-[11px] font-mono text-rose-400">
+                    {tickerError}
+                  </div>
+                )}
+
+                {activeTicker && !tickerError && (
+                  <div className="text-[11px] font-mono text-zinc-400 border-t border-zinc-800/80 pt-2 flex justify-between">
+                    <span>1Y Realized Vol: {activeTicker.volPct}%</span>
+                    <span>({activeTicker.days}d sampled)</span>
+                  </div>
                 )}
               </div>
 
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleFetchMarketTicker(tickerInput);
-                }}
-                className="flex gap-1.5"
-              >
-                <input
-                  type="text"
-                  value={tickerInput}
-                  onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
-                  placeholder="Ticker (e.g. NVDA, SPY)"
-                  className="flex-1 bg-[#111114] border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono text-white uppercase focus:outline-none focus:border-amber-500"
-                />
-                <button
-                  type="submit"
-                  disabled={tickerLoading}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-semibold text-xs transition cursor-pointer"
-                >
-                  {tickerLoading ? (
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Search className="w-3.5 h-3.5" />
-                  )}
-                  Load
-                </button>
-              </form>
-
-              <div className="flex flex-wrap gap-1">
-                {["SPY", "NVDA", "AAPL", "TSLA", "MSFT"].map((sym) => (
-                  <button
-                    key={sym}
-                    type="button"
-                    onClick={() => handleFetchMarketTicker(sym)}
-                    className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-mono text-zinc-300 cursor-pointer"
-                  >
-                    {sym}
-                  </button>
-                ))}
-              </div>
-
-              {tickerError && (
-                <div className="text-[11px] font-mono text-rose-400">
-                  {tickerError}
-                </div>
-              )}
-
-              {activeTicker && !tickerError && (
-                <div className="text-[11px] font-mono text-zinc-400 border-t border-zinc-800/80 pt-2 flex justify-between">
-                  <span>1Y Realized Vol: {activeTicker.volPct}%</span>
-                  <span>({activeTicker.days}d sampled)</span>
-                </div>
-              )}
-            </div>
-
-            {/* PHASE 3: NEWTON-RAPHSON IMPLIED VOLATILITY SOLVER */}
-            <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-                  <Compass className="w-3.5 h-3.5" />
-                  Implied Vol Solver (Newton)
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setTargetMarketPrice(
-                      Number(active.blackScholesPrice.toFixed(2))
-                    )
-                  }
-                  className="text-[10px] font-mono text-zinc-400 hover:text-zinc-200 underline cursor-pointer"
-                >
-                  Use Theo (${active.blackScholesPrice.toFixed(2)})
-                </button>
-              </div>
-
-              <form onSubmit={handleSolveImpliedVol} className="flex gap-1.5">
-                <div className="flex-1 flex items-center bg-[#111114] border border-zinc-800 rounded px-2.5 py-1">
-                  <span className="text-xs font-mono text-zinc-500 mr-1">$</span>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="0.01"
-                    value={targetMarketPrice}
-                    onChange={(e) => setTargetMarketPrice(e.target.value)}
-                    placeholder="Market Option Price"
-                    className="w-full bg-transparent text-xs font-mono text-white focus:outline-none tabular-nums"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={ivLoading}
-                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-semibold text-xs transition cursor-pointer"
-                >
-                  {ivLoading ? "..." : "Solve IV"}
-                </button>
-              </form>
-
-              {ivError && (
-                <div className="text-[11px] font-mono text-rose-400">
-                  {ivError}
-                </div>
-              )}
-
-              {ivResult && !ivError && (
-                <div className="border-t border-zinc-800 pt-2 space-y-1.5 text-[11px] font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-zinc-400">Solved Implied Vol:</span>
-                    <span className="text-emerald-400 font-bold text-sm">
-                      {(ivResult.impliedVolatility * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-zinc-500">
-                    <span>Newton Iterations: {ivResult.iterations}</span>
-                    <span>Err: ${ivResult.pricingError.toFixed(5)}</span>
-                  </div>
-                  {activeTicker && (
-                    <div className="flex items-center justify-between pt-1">
-                      <span className="text-zinc-400">vs. Realized Vol:</span>
-                      <span
-                        className={
-                          ivResult.impliedVolatility * 100 > activeTicker.volPct
-                            ? "text-amber-400 font-semibold"
-                            : "text-cyan-400 font-semibold"
-                        }
-                      >
-                        {ivResult.impliedVolatility * 100 > activeTicker.volPct
-                          ? "EXPENSIVE (IV > HV)"
-                          : "CHEAP (IV < HV)"}
-                      </span>
-                    </div>
-                  )}
+              {/* NEWTON-RAPHSON IMPLIED VOLATILITY SOLVER */}
+              <div className="bg-[#09090b] border border-zinc-800 rounded p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                    <Compass className="w-3.5 h-3.5" />
+                    Implied Vol Solver (Newton)
+                  </span>
                   <button
                     type="button"
                     onClick={() =>
-                      setVolatility(
-                        Number(
-                          Math.min(
-                            150,
-                            Math.max(2, ivResult.impliedVolatility * 100)
-                          ).toFixed(1)
-                        )
+                      setTargetMarketPrice(
+                        Number(active.blackScholesPrice.toFixed(2))
                       )
                     }
-                    className="w-full mt-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-amber-400 text-[11px] font-mono cursor-pointer"
+                    className="text-[10px] font-mono text-zinc-400 hover:text-zinc-200 underline cursor-pointer"
                   >
-                    Apply {(ivResult.impliedVolatility * 100).toFixed(1)}% IV to
-                    Sliders →
+                    Use Theo (${active.blackScholesPrice.toFixed(2)})
                   </button>
                 </div>
-              )}
-            </div>
 
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-              <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-amber-500" />
-                Contract Parameters
-              </span>
-              <span className="text-[11px] font-mono text-zinc-400">
-                T = {timeInYears.toFixed(4)}y
-              </span>
-            </div>
-
-            {/* Call / Put Selector */}
-            <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#09090b] rounded border border-zinc-800">
-              <button
-                onClick={() => setOptionType("call")}
-                className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition ${
-                  optionType === "call"
-                    ? "bg-emerald-600 text-white"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                <TrendingUp className="w-3.5 h-3.5" />
-                LONG CALL
-              </button>
-              <button
-                onClick={() => setOptionType("put")}
-                className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition ${
-                  optionType === "put"
-                    ? "bg-rose-600 text-white"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                <TrendingDown className="w-3.5 h-3.5" />
-                LONG PUT
-              </button>
-            </div>
-
-            {/* Parameter Inputs */}
-            <div className="space-y-3">
-              {[
-                {
-                  label: "Underlying Spot (S)",
-                  hint: "Current stock price on the market",
-                  val: spotPrice,
-                  setter: setSpotPrice,
-                  min: 10,
-                  max: 1000,
-                  step: 1,
-                  prefix: "$",
-                },
-                {
-                  label: "Strike Price (K)",
-                  hint: "Locked-in contract exercise price",
-                  val: strikePrice,
-                  setter: setStrikePrice,
-                  min: 10,
-                  max: 1000,
-                  step: 1,
-                  prefix: "$",
-                },
-                {
-                  label: "Annual Volatility (σ)",
-                  hint: "Expected annualized % swing",
-                  val: volatility,
-                  setter: setVolatility,
-                  min: 2,
-                  max: 150,
-                  step: 0.5,
-                  suffix: "%",
-                },
-                {
-                  label: "Time to Expiry (Days)",
-                  hint: "Calendar days until contract expires",
-                  val: daysToExpiry,
-                  setter: setDaysToExpiry,
-                  min: 1,
-                  max: 730,
-                  step: 1,
-                  suffix: "d",
-                },
-                {
-                  label: "Risk-Free Rate (r)",
-                  hint: "Annualized Treasury yield",
-                  val: riskFreeRate,
-                  setter: setRiskFreeRate,
-                  min: 0,
-                  max: 15,
-                  step: 0.25,
-                  suffix: "%",
-                },
-                {
-                  label: "MC Simulations (N)",
-                  hint: "Random pricing paths generated in Python",
-                  val: mcSimulations,
-                  setter: setMcSimulations,
-                  min: 1000,
-                  max: 100000,
-                  step: 1000,
-                },
-              ].map((item) => (
-                <div key={item.label} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-zinc-300 font-medium">
-                      {item.label}
+                <form onSubmit={handleSolveImpliedVol} className="flex gap-1.5">
+                  <div className="flex-1 flex items-center bg-[#111114] border border-zinc-800 rounded px-2.5 py-1">
+                    <span className="text-xs font-mono text-zinc-500 mr-1">
+                      $
                     </span>
-                    <div className="flex items-center bg-[#09090b] border border-zinc-800 rounded px-2 py-0.5">
-                      {item.prefix && (
-                        <span className="text-zinc-500 font-mono text-xs mr-0.5">
-                          {item.prefix}
-                        </span>
-                      )}
-                      <input
-                        type="number"
-                        min={item.min}
-                        max={item.max}
-                        step={item.step}
-                        value={item.val}
-                        onChange={(e) =>
-                          item.setter(
-                            Math.max(item.min, Number(e.target.value) || item.min)
+                    <input
+                      type="number"
+                      step="0.05"
+                      min="0.01"
+                      value={targetMarketPrice}
+                      onChange={(e) => setTargetMarketPrice(e.target.value)}
+                      className="w-full bg-transparent text-xs font-mono text-white focus:outline-none tabular-nums"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={ivLoading}
+                    className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-semibold text-xs transition cursor-pointer"
+                  >
+                    {ivLoading ? "..." : "Solve IV"}
+                  </button>
+                </form>
+
+                {ivError && (
+                  <div className="text-[11px] font-mono text-rose-400">
+                    {ivError}
+                  </div>
+                )}
+
+                {ivResult && !ivError && (
+                  <div className="border-t border-zinc-800 pt-2 space-y-1.5 text-[11px] font-mono">
+                    <div className="flex items-center justify-between">
+                      <span className="text-zinc-400">Solved Implied Vol:</span>
+                      <span className="text-emerald-400 font-bold text-sm">
+                        {(ivResult.impliedVolatility * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-zinc-500">
+                      <span>Newton Iterations: {ivResult.iterations}</span>
+                      <span>Err: ${ivResult.pricingError.toFixed(5)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVolatility(
+                          Number(
+                            Math.min(
+                              150,
+                              Math.max(2, ivResult.impliedVolatility * 100)
+                            ).toFixed(1)
                           )
-                        }
-                        className="w-16 bg-transparent text-right font-mono font-semibold text-amber-400 focus:outline-none tabular-nums text-xs"
-                      />
-                      {item.suffix && (
-                        <span className="text-zinc-500 font-mono text-xs ml-0.5">
-                          {item.suffix}
-                        </span>
-                      )}
+                        )
+                      }
+                      className="w-full mt-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-amber-400 text-[11px] font-mono cursor-pointer"
+                    >
+                      Apply {(ivResult.impliedVolatility * 100).toFixed(1)}% IV
+                      to Sliders →
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Call / Put Selector */}
+              <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#09090b] rounded border border-zinc-800">
+                <button
+                  onClick={() => setOptionType("call")}
+                  className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition cursor-pointer ${
+                    optionType === "call"
+                      ? "bg-emerald-600 text-white"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  LONG CALL
+                </button>
+                <button
+                  onClick={() => setOptionType("put")}
+                  className={`flex items-center justify-center gap-1.5 py-2 rounded-xs font-mono text-xs font-semibold transition cursor-pointer ${
+                    optionType === "put"
+                      ? "bg-rose-600 text-white"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <TrendingDown className="w-3.5 h-3.5" />
+                  LONG PUT
+                </button>
+              </div>
+
+              {/* Parameter Inputs */}
+              <div className="space-y-3">
+                {[
+                  {
+                    label: "Underlying Spot (S)",
+                    val: spotPrice,
+                    setter: setSpotPrice,
+                    min: 10,
+                    max: 1000,
+                    step: 1,
+                    prefix: "$",
+                  },
+                  {
+                    label: "Strike Price (K)",
+                    val: strikePrice,
+                    setter: setStrikePrice,
+                    min: 10,
+                    max: 1000,
+                    step: 1,
+                    prefix: "$",
+                  },
+                  {
+                    label: "Annual Volatility (σ)",
+                    val: volatility,
+                    setter: setVolatility,
+                    min: 2,
+                    max: 150,
+                    step: 0.5,
+                    suffix: "%",
+                  },
+                  {
+                    label: "Time to Expiry (Days)",
+                    val: daysToExpiry,
+                    setter: setDaysToExpiry,
+                    min: 1,
+                    max: 730,
+                    step: 1,
+                    suffix: "d",
+                  },
+                  {
+                    label: "Risk-Free Rate (r)",
+                    val: riskFreeRate,
+                    setter: setRiskFreeRate,
+                    min: 0,
+                    max: 15,
+                    step: 0.25,
+                    suffix: "%",
+                  },
+                  {
+                    label: "MC Simulations (N)",
+                    val: mcSimulations,
+                    setter: setMcSimulations,
+                    min: 1000,
+                    max: 100000,
+                    step: 1000,
+                  },
+                ].map((item) => (
+                  <div key={item.label} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-zinc-300 font-medium">
+                        {item.label}
+                      </span>
+                      <div className="flex items-center bg-[#09090b] border border-zinc-800 rounded px-2 py-0.5">
+                        {item.prefix && (
+                          <span className="text-zinc-500 font-mono text-xs mr-0.5">
+                            {item.prefix}
+                          </span>
+                        )}
+                        <input
+                          type="number"
+                          min={item.min}
+                          max={item.max}
+                          step={item.step}
+                          value={item.val}
+                          onChange={(e) =>
+                            item.setter(
+                              Math.max(
+                                item.min,
+                                Number(e.target.value) || item.min
+                              )
+                            )
+                          }
+                          className="w-16 bg-transparent text-right font-mono font-semibold text-amber-400 focus:outline-none tabular-nums text-xs"
+                        />
+                        {item.suffix && (
+                          <span className="text-zinc-500 font-mono text-xs ml-0.5">
+                            {item.suffix}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={item.min}
+                      max={item.max}
+                      step={item.step}
+                      value={item.val}
+                      onChange={(e) => item.setter(Number(e.target.value))}
+                      className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-zinc-800 bg-[#0c0c0f] space-y-2 text-xs font-mono">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Intrinsic Value:</span>
+                <span className="text-zinc-200 tabular-nums">
+                  ${intrinsicNow.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Extrinsic (Time) Value:</span>
+                <span className="text-amber-400 tabular-nums">
+                  ${extrinsicNow.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between pt-1 border-t border-zinc-800/80">
+                <span className="text-zinc-500">Break-Even at Expiry:</span>
+                <span className="text-emerald-400 font-bold tabular-nums">
+                  ${breakEvenPrice.toFixed(2)}
+                </span>
+              </div>
+            </div>
+          </aside>
+
+          <section
+            className={`${
+              uiMode === "pro" ? "lg:col-span-9" : "lg:col-span-8"
+            } flex flex-col gap-5`}
+          >
+            {/* TOP TELEMETRY STRIP */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  European Black-Scholes
+                </div>
+                <div className="text-2xl font-mono font-bold text-emerald-400 tabular-nums mt-1">
+                  ${active.blackScholesPrice.toFixed(4)}
+                </div>
+                <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                  Closed-Form Exact
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Monte Carlo Mean
+                </div>
+                <div className="text-2xl font-mono font-bold text-zinc-100 tabular-nums mt-1">
+                  ${active.monteCarloPrice.toFixed(4)}
+                </div>
+                <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                  95% CI: [${localAnalytics.ci95Low.toFixed(2)}, $
+                  {localAnalytics.ci95High.toFixed(2)}]
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  American CRR Binomial
+                </div>
+                <div className="text-2xl font-mono font-bold text-amber-400 tabular-nums mt-1">
+                  $
+                  {(
+                    active.americanPrice || active.blackScholesPrice
+                  ).toFixed(4)}
+                </div>
+                <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                  Early Ex. Premium: +$
+                  {(active.earlyExercisePremium || 0).toFixed(4)}
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  d1 / d2 Z-Scores
+                </div>
+                <div className="text-xl font-mono font-bold text-zinc-200 tabular-nums mt-1">
+                  {localAnalytics.d1.toFixed(3)}{" "}
+                  <span className="text-zinc-600">/</span>{" "}
+                  {localAnalytics.d2.toFixed(3)}
+                </div>
+                <div className="text-[11px] font-mono text-zinc-500 mt-1">
+                  N(d2) ITM Prob: {localAnalytics.probITM.toFixed(1)}%
+                </div>
+              </div>
+            </div>
+
+            {/* GREEKS STRIP */}
+            <div className="bg-[#111114] border border-zinc-800 rounded p-4">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                {[
+                  {
+                    sym: "DELTA (Δ)",
+                    val: active.delta,
+                    desc: "∂V / ∂S (Hedge Ratio)",
+                  },
+                  {
+                    sym: "GAMMA (Γ)",
+                    val: active.gamma,
+                    desc: "∂²V / ∂S² (Convexity)",
+                  },
+                  {
+                    sym: "VEGA (ν)",
+                    val: active.vega,
+                    desc: "∂V / ∂σ (per 1% Vol)",
+                  },
+                  {
+                    sym: "THETA (Θ)",
+                    val: active.theta,
+                    desc: "∂V / ∂t (Daily Carry)",
+                  },
+                  {
+                    sym: "RHO (ρ)",
+                    val: active.rho,
+                    desc: "∂V / ∂r (per 1% Rate)",
+                  },
+                ].map((g) => (
+                  <div
+                    key={g.sym}
+                    className="bg-[#09090b] border border-zinc-800/80 rounded p-3"
+                  >
+                    <div className="text-[11px] font-mono text-zinc-400">
+                      {g.sym}
+                    </div>
+                    <div
+                      className={`text-lg font-mono font-bold tabular-nums mt-0.5 ${
+                        g.val < 0 ? "text-rose-400" : "text-zinc-100"
+                      }`}
+                    >
+                      {g.val >= 0 ? `+${g.val.toFixed(4)}` : g.val.toFixed(4)}
+                    </div>
+                    <div className="text-[11px] text-zinc-500 mt-1">
+                      {g.desc}
                     </div>
                   </div>
-                  {uiMode === "guided" && (
-                    <p className="text-[11px] text-zinc-500">{item.hint}</p>
-                  )}
-                  <input
-                    type="range"
-                    min={item.min}
-                    max={item.max}
-                    step={item.step}
-                    value={item.val}
-                    onChange={(e) => item.setter(Number(e.target.value))}
-                    className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="p-4 border-t border-zinc-800 bg-[#0c0c0f] space-y-2 text-xs font-mono">
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Intrinsic Value:</span>
-              <span className="text-zinc-200 tabular-nums">
-                ${intrinsicNow.toFixed(2)}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Extrinsic (Time) Value:</span>
-              <span className="text-amber-400 tabular-nums">
-                ${extrinsicNow.toFixed(2)}
-              </span>
-            </div>
-            <div className="flex justify-between pt-1 border-t border-zinc-800/80">
-              <span className="text-zinc-500">Break-Even at Expiry:</span>
-              <span className="text-emerald-400 font-bold tabular-nums">
-                ${breakEvenPrice.toFixed(2)}
-              </span>
-            </div>
-          </div>
-        </aside>
-
-        {/* RIGHT PANEL: Pricing Telemetry, Charts & Risk Matrices */}
-        <section
-          className={`${
-            uiMode === "pro" ? "lg:col-span-9" : "lg:col-span-8"
-          } flex flex-col gap-5`}
-        >
-          {uiMode === "guided" && (
-            <div className="bg-[#111114] border border-amber-500/30 rounded p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase tracking-wider">
-                  <Info className="w-4 h-4" />
-                  Plain-English Trade Summary{" "}
-                  {activeTicker ? `(${activeTicker.ticker})` : ""}
-                </div>
-                <p className="text-sm text-zinc-200 leading-relaxed">
-                  This{" "}
-                  <strong className="text-white uppercase">{optionType}</strong>{" "}
-                  option costs{" "}
-                  <strong className="text-emerald-400 font-mono">
-                    ${active.blackScholesPrice.toFixed(2)}
-                  </strong>{" "}
-                  per share. At expiration in{" "}
-                  <strong className="text-white">{daysToExpiry} days</strong>,
-                  the stock must be{" "}
-                  {optionType === "call" ? "above" : "below"}{" "}
-                  <strong className="text-amber-400 font-mono">
-                    ${breakEvenPrice.toFixed(2)}
-                  </strong>{" "}
-                  for you to make a net profit.
-                </p>
-              </div>
-              <div className="shrink-0 bg-[#09090b] border border-zinc-800 rounded px-4 py-2.5 text-center">
-                <div className="text-[11px] text-zinc-400 uppercase font-mono">
-                  Prob. of Finishing ITM
-                </div>
-                <div className="text-2xl font-mono font-bold text-amber-400 tabular-nums mt-0.5">
-                  {localAnalytics.probITM.toFixed(1)}%
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TOP TELEMETRY STRIP */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
-              <div className="text-[11px] font-mono uppercase text-zinc-400">
-                Black-Scholes Theo
-              </div>
-              <div className="text-2xl font-mono font-bold text-emerald-400 tabular-nums mt-1">
-                ${active.blackScholesPrice.toFixed(4)}
-              </div>
-              <div className="text-[11px] font-mono text-zinc-500 mt-1">
-                Closed-Form Exact
+                ))}
               </div>
             </div>
 
-            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
-              <div className="text-[11px] font-mono uppercase text-zinc-400">
-                Monte Carlo Mean
-              </div>
-              <div className="text-2xl font-mono font-bold text-zinc-100 tabular-nums mt-1">
-                ${active.monteCarloPrice.toFixed(4)}
-              </div>
-              <div className="text-[11px] font-mono text-zinc-500 mt-1">
-                95% CI: [${localAnalytics.ci95Low.toFixed(2)}, $
-                {localAnalytics.ci95High.toFixed(2)}]
-              </div>
-            </div>
-
-            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
-              <div className="text-[11px] font-mono uppercase text-zinc-400">
-                MC Basis Error |BS - MC|
-              </div>
-              <div className="text-2xl font-mono font-bold text-amber-400 tabular-nums mt-1">
-                $
-                {Math.abs(
-                  active.blackScholesPrice - active.monteCarloPrice
-                ).toFixed(4)}
-              </div>
-              <div className="text-[11px] font-mono text-zinc-500 mt-1">
-                Std Error (SE): ±${localAnalytics.stdError.toFixed(4)}
-              </div>
-            </div>
-
-            <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
-              <div className="text-[11px] font-mono uppercase text-zinc-400">
-                d1 / d2 Z-Scores
-              </div>
-              <div className="text-xl font-mono font-bold text-zinc-200 tabular-nums mt-1">
-                {localAnalytics.d1.toFixed(3)}{" "}
-                <span className="text-zinc-600">/</span>{" "}
-                {localAnalytics.d2.toFixed(3)}
-              </div>
-              <div className="text-[11px] font-mono text-zinc-500 mt-1">
-                N(d2) ITM Prob: {localAnalytics.probITM.toFixed(1)}%
-              </div>
-            </div>
-          </div>
-
-          {/* GREEKS STRIP */}
-          <div className="bg-[#111114] border border-zinc-800 rounded p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">
-                First & Second-Order Sensitivities (The Greeks)
-              </span>
-              <span className="text-[11px] font-mono text-zinc-500">
-                {uiMode === "guided"
-                  ? "How your option reacts to market changes"
-                  : "Partial Derivatives ∂V/∂θ"}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-              {[
-                {
-                  sym: "DELTA (Δ)",
-                  val: active.delta,
-                  proDesc: "∂V / ∂S (Hedge Ratio)",
-                  begDesc: "P&L per +$1 stock move",
-                },
-                {
-                  sym: "GAMMA (Γ)",
-                  val: active.gamma,
-                  proDesc: "∂²V / ∂S² (Convexity)",
-                  begDesc: "How fast Delta accelerates",
-                },
-                {
-                  sym: "VEGA (ν)",
-                  val: active.vega,
-                  proDesc: "∂V / ∂σ (per 1% Vol)",
-                  begDesc: "P&L per +1% volatility jump",
-                },
-                {
-                  sym: "THETA (Θ)",
-                  val: active.theta,
-                  proDesc: "∂V / ∂t (Daily Carry)",
-                  begDesc: "Value lost per day passing",
-                },
-                {
-                  sym: "RHO (ρ)",
-                  val: active.rho,
-                  proDesc: "∂V / ∂r (per 1% Rate)",
-                  begDesc: "P&L per +1% interest rate",
-                },
-              ].map((g) => (
-                <div
-                  key={g.sym}
-                  className="bg-[#09090b] border border-zinc-800/80 rounded p-3"
-                >
-                  <div className="text-[11px] font-mono text-zinc-400">
-                    {g.sym}
-                  </div>
-                  <div
-                    className={`text-lg font-mono font-bold tabular-nums mt-0.5 ${
-                      g.val < 0 ? "text-rose-400" : "text-zinc-100"
-                    }`}
-                  >
-                    {g.val >= 0 ? `+${g.val.toFixed(4)}` : g.val.toFixed(4)}
-                  </div>
-                  <div className="text-[11px] text-zinc-500 mt-1">
-                    {uiMode === "guided" ? g.begDesc : g.proDesc}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* MULTI-TAB VISUALIZATION WORKSTATION */}
-          <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  onClick={() => setActiveTab("spaghetti")}
-                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
-                    activeTab === "spaghetti"
-                      ? "bg-amber-500 text-zinc-950 font-semibold"
-                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
-                  }`}
-                >
-                  1. Monte Carlo Paths
-                </button>
-                <button
-                  onClick={() => setActiveTab("payoff")}
-                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
-                    activeTab === "payoff"
-                      ? "bg-amber-500 text-zinc-950 font-semibold"
-                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
-                  }`}
-                >
-                  2. Payoff Diagram
-                </button>
-                <button
-                  onClick={() => setActiveTab("smile")}
-                  className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
-                    activeTab === "smile"
-                      ? "bg-amber-500 text-zinc-950 font-semibold"
-                      : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
-                  }`}
-                >
-                  3. Volatility Smile & Term Surface
-                </button>
-                {uiMode === "pro" && (
+            {/* MULTI-TAB VISUALIZATION WORKSTATION */}
+            <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
-                    onClick={() => setActiveTab("greeks")}
-                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition ${
-                      activeTab === "greeks"
+                    onClick={() => setActiveTab("spaghetti")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      activeTab === "spaghetti"
                         ? "bg-amber-500 text-zinc-950 font-semibold"
                         : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
                     }`}
                   >
-                    4. Delta / Gamma Curve
+                    1. Monte Carlo Paths
                   </button>
+                  <button
+                    onClick={() => setActiveTab("payoff")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      activeTab === "payoff"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    2. Payoff Diagram
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("smile")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      activeTab === "smile"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    3. Volatility Smile Surface
+                  </button>
+                </div>
+
+                {activeTab === "spaghetti" && (
+                  <div className="flex items-center gap-2 text-xs font-mono">
+                    <select
+                      value={spaghettiCount}
+                      onChange={(e) =>
+                        setSpaghettiCount(Number(e.target.value))
+                      }
+                      className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300"
+                    >
+                      <option value={30}>30 Paths</option>
+                      <option value={80}>80 Paths</option>
+                      <option value={150}>150 Paths</option>
+                    </select>
+                    <button
+                      onClick={() => setWhitePaperPlot(!whitePaperPlot)}
+                      className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 cursor-pointer"
+                    >
+                      {whitePaperPlot ? "Dark Terminal" : "Classic White Plot"}
+                    </button>
+                    <button
+                      onClick={() => setPathSeed((s) => s + 1)}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 border border-zinc-700 cursor-pointer"
+                    >
+                      <Shuffle className="w-3.5 h-3.5" />
+                      Resimulate
+                    </button>
+                  </div>
                 )}
               </div>
 
               {activeTab === "spaghetti" && (
-                <div className="flex items-center gap-2 text-xs font-mono">
-                  <select
-                    value={spaghettiCount}
-                    onChange={(e) => setSpaghettiCount(Number(e.target.value))}
-                    className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300"
-                  >
-                    <option value={30}>30 Paths</option>
-                    <option value={80}>80 Paths</option>
-                    <option value={150}>150 Paths</option>
-                  </select>
-                  <button
-                    onClick={() => setWhitePaperPlot(!whitePaperPlot)}
-                    className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300"
-                  >
-                    {whitePaperPlot ? "Dark Terminal" : "Classic White Plot"}
-                  </button>
-                  <button
-                    onClick={() => setPathSeed((s) => s + 1)}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 border border-zinc-700"
-                  >
-                    <Shuffle className="w-3.5 h-3.5" />
-                    Resimulate
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {activeTab === "spaghetti" && (
-              <div>
                 <MonteCarloSpaghettiCanvas
                   spotPrice={spotPrice}
                   strikePrice={strikePrice}
@@ -1368,97 +1475,62 @@ export default function App() {
                   seed={pathSeed}
                   whitePaperTheme={whitePaperPlot}
                 />
-                <div className="mt-2 flex flex-wrap items-center justify-between text-[11px] font-mono text-zinc-500">
-                  <span>
-                    Simulating {spaghettiCount} Geometric Brownian Motion paths
-                    across 62 discrete time steps
-                  </span>
-                  <span className="text-amber-400">
-                    Dashed Line = Strike Price (${strikePrice})
-                  </span>
+              )}
+
+              {activeTab === "payoff" && (
+                <div className="h-[340px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={active.payoffCurve}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                      <XAxis
+                        dataKey="spot"
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `$${v}`}
+                      />
+                      <YAxis
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `$${v}`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#09090b",
+                          borderColor: "#27272a",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <ReferenceLine
+                        x={strikePrice}
+                        stroke="#f59e0b"
+                        strokeDasharray="4 4"
+                      />
+                      <ReferenceLine y={0} stroke="#3f3f46" />
+                      <Line
+                        type="monotone"
+                        dataKey="currentTheoreticalValue"
+                        name="Black-Scholes Value Today"
+                        stroke="#10b981"
+                        strokeWidth={2.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="expirationPayoff"
+                        name="Intrinsic Value at Expiry"
+                        stroke="#f59e0b"
+                        strokeWidth={2}
+                        strokeDasharray="5 5"
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
                 </div>
-              </div>
-            )}
+              )}
 
-            {activeTab === "payoff" && (
-              <div className="h-[340px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={active.payoffCurve}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
-                    <XAxis
-                      dataKey="spot"
-                      stroke="#71717a"
-                      tick={{ fontSize: 11, fontFamily: "monospace" }}
-                      tickFormatter={(v) => `$${v}`}
-                    />
-                    <YAxis
-                      stroke="#71717a"
-                      tick={{ fontSize: 11, fontFamily: "monospace" }}
-                      tickFormatter={(v) => `$${v}`}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#09090b",
-                        borderColor: "#27272a",
-                        fontFamily: "monospace",
-                        fontSize: "12px",
-                      }}
-                    />
-                    <ReferenceLine
-                      x={strikePrice}
-                      stroke="#f59e0b"
-                      strokeDasharray="4 4"
-                      label={{
-                        value: `Strike $${strikePrice}`,
-                        fill: "#f59e0b",
-                        fontSize: 11,
-                      }}
-                    />
-                    <ReferenceLine
-                      x={spotPrice}
-                      stroke="#10b981"
-                      strokeDasharray="2 2"
-                      label={{
-                        value: `Spot $${spotPrice}`,
-                        fill: "#10b981",
-                        fontSize: 11,
-                      }}
-                    />
-                    <ReferenceLine y={0} stroke="#3f3f46" />
-                    <Line
-                      type="monotone"
-                      dataKey="currentTheoreticalValue"
-                      name="Black-Scholes Value Today"
-                      stroke="#10b981"
-                      strokeWidth={2.5}
-                      dot={false}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="expirationPayoff"
-                      name="Intrinsic Value at Expiry"
-                      stroke="#f59e0b"
-                      strokeWidth={2}
-                      strokeDasharray="5 5"
-                      dot={false}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="netProfitAtExpiry"
-                      name="Net P&L at Expiry"
-                      stroke="#6366f1"
-                      strokeWidth={1.75}
-                      dot={false}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-
-            {/* TAB 3: PHASE 3 VOLATILITY SMILE & MULTI-TENOR SURFACE */}
-            {activeTab === "smile" && (
-              <div>
-                <div className="h-[320px] w-full">
+              {activeTab === "smile" && (
+                <div className="h-[340px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={localAnalytics.smileCurve}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
@@ -1488,16 +1560,6 @@ export default function App() {
                           fontSize: "11px",
                         }}
                       />
-                      <ReferenceLine
-                        x={spotPrice}
-                        stroke="#10b981"
-                        strokeDasharray="3 3"
-                        label={{
-                          value: `ATM Spot $${spotPrice}`,
-                          fill: "#10b981",
-                          fontSize: 11,
-                        }}
-                      />
                       <Line
                         type="monotone"
                         dataKey="iv30d"
@@ -1522,148 +1584,440 @@ export default function App() {
                         strokeWidth={2}
                         dot={false}
                       />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          </section>
+        </main>
+      )}
+
+      {/* =====================================================================
+          MODULE 2: ALGORITHMIC BACKTESTING ENGINE & STRATEGY DASHBOARD
+         ===================================================================== */}
+      {activeModule === "backtest" && (
+        <main className="max-w-[1440px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {/* LEFT PANEL: Strategy Configuration */}
+          <aside className="lg:col-span-3 bg-[#111114] border border-zinc-800/90 rounded p-4 flex flex-col justify-between space-y-5">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
+                <span className="text-xs font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  SMA Crossover Backtester
+                </span>
+              </div>
+
+              {/* Ticker Input & Quick Pills */}
+              <div className="space-y-2">
+                <label className="text-xs text-zinc-300 font-medium block">
+                  Asset Ticker Symbol
+                </label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={btTicker}
+                    onChange={(e) => setBtTicker(e.target.value.toUpperCase())}
+                    className="flex-1 bg-[#09090b] border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono text-white uppercase focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleRunBacktest(btTicker)}
+                    disabled={btLoading}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-semibold text-xs transition cursor-pointer"
+                  >
+                    {btLoading ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    Run
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {["NVDA", "SPY", "AAPL", "TSLA", "MSFT", "QQQ"].map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      onClick={() => handleRunBacktest(sym)}
+                      className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-mono text-zinc-300 cursor-pointer"
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Historical Lookback Period */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-zinc-300 font-medium block">
+                  Historical Lookback Horizon
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {["1y", "2y", "5y"].map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setBtPeriod(p)}
+                      className={`py-1.5 rounded text-xs font-mono font-semibold border transition cursor-pointer ${
+                        btPeriod === p
+                          ? "bg-amber-500 text-zinc-950 border-amber-500"
+                          : "bg-[#09090b] text-zinc-400 border-zinc-800 hover:text-zinc-200"
+                      }`}
+                    >
+                      {p.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Fast SMA Window */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-300">Fast SMA Window</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    {fastWindow} days
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="5"
+                  max="100"
+                  step="1"
+                  value={fastWindow}
+                  onChange={(e) => setFastWindow(Number(e.target.value))}
+                  className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                />
+              </div>
+
+              {/* Slow SMA Window */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-300">Slow SMA Window</span>
+                  <span className="font-mono font-bold text-amber-400">
+                    {slowWindow} days
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="20"
+                  max="250"
+                  step="5"
+                  value={slowWindow}
+                  onChange={(e) => setSlowWindow(Number(e.target.value))}
+                  className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                />
+              </div>
+
+              {/* Initial Capital */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-300">Initial Capital</span>
+                  <span className="font-mono font-bold text-zinc-100">
+                    ${initialCapital.toLocaleString()}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="1000"
+                  max="100000"
+                  step="1000"
+                  value={initialCapital}
+                  onChange={(e) => setInitialCapital(Number(e.target.value))}
+                  className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleRunBacktest(btTicker)}
+                disabled={btLoading}
+                className="w-full py-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-semibold text-xs transition cursor-pointer"
+              >
+                {btLoading
+                  ? "Running Vectorized Backtest..."
+                  : "Execute Backtest in Python →"}
+              </button>
+
+              {btError && (
+                <div className="text-[11px] font-mono text-amber-400 bg-amber-950/30 border border-amber-500/30 rounded p-2">
+                  {btError}
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 bg-[#09090b] border border-zinc-800 rounded text-[11px] font-mono text-zinc-400 space-y-1">
+              <div className="text-zinc-200 font-semibold">
+                Execution Rule (Zero Look-Ahead):
+              </div>
+              <div>• Long (1.0) when Fast SMA ({fastWindow}d) &gt; Slow SMA ({slowWindow}d)</div>
+              <div>• Flat Cash (0.0) when Fast SMA &le; Slow SMA</div>
+              <div>• Signal shifted +1 bar: position = signal.shift(1)</div>
+            </div>
+          </aside>
+
+          {/* RIGHT PANEL: Backtest Performance Cards & Equity/Drawdown Charts */}
+          <section className="lg:col-span-9 flex flex-col gap-5">
+            {/* Top 5 Hedge Fund KPI Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Strategy Final Equity
+                </div>
+                <div className="text-xl font-mono font-bold text-emerald-400 tabular-nums mt-1">
+                  ${btData.finalEquity.toLocaleString()}
+                </div>
+                <div className="text-xs font-mono text-zinc-400 mt-1">
+                  {btData.totalReturnPct >= 0 ? "+" : ""}
+                  {btData.totalReturnPct}% Total Return
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Buy & Hold Benchmark
+                </div>
+                <div className="text-xl font-mono font-bold text-zinc-200 tabular-nums mt-1">
+                  ${btData.finalBuyHoldEquity.toLocaleString()}
+                </div>
+                <div className="text-xs font-mono text-zinc-500 mt-1">
+                  {btData.buyHoldReturnPct >= 0 ? "+" : ""}
+                  {btData.buyHoldReturnPct}% Benchmark
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Annualized Sharpe
+                </div>
+                <div className="text-xl font-mono font-bold text-amber-400 tabular-nums mt-1">
+                  {btData.sharpeRatio.toFixed(2)}
+                </div>
+                <div className="text-xs font-mono text-zinc-500 mt-1">
+                  Alpha: {strategyAlpha >= 0 ? "+" : ""}
+                  {strategyAlpha.toFixed(1)}%
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Max Drawdown
+                </div>
+                <div className="text-xl font-mono font-bold text-rose-400 tabular-nums mt-1">
+                  {btData.maxDrawdownPct.toFixed(2)}%
+                </div>
+                <div className="text-xs font-mono text-zinc-500 mt-1">
+                  Peak-to-Trough Drop
+                </div>
+              </div>
+
+              <div className="bg-[#111114] border border-zinc-800 rounded p-3.5">
+                <div className="text-[11px] font-mono uppercase text-zinc-400">
+                  Active Win Rate
+                </div>
+                <div className="text-xl font-mono font-bold text-zinc-100 tabular-nums mt-1">
+                  {btData.winRatePct}%
+                </div>
+                <div className="text-xs font-mono text-zinc-500 mt-1">
+                  {btData.totalTrades} Crossover Entries
+                </div>
+              </div>
+            </div>
+
+            {/* Chart Visualization Card */}
+            <div className="bg-[#111114] border border-zinc-800 rounded p-4 flex flex-col gap-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setBtChartTab("equity")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      btChartTab === "equity"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    1. Cumulative Equity Curve ($ vs Buy & Hold)
+                  </button>
+                  <button
+                    onClick={() => setBtChartTab("drawdown")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      btChartTab === "drawdown"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    2. Underwater Drawdown (%)
+                  </button>
+                  <button
+                    onClick={() => setBtChartTab("signals")}
+                    className={`px-3 py-1.5 rounded-xs text-xs font-mono font-medium transition cursor-pointer ${
+                      btChartTab === "signals"
+                        ? "bg-amber-500 text-zinc-950 font-semibold"
+                        : "bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+                    }`}
+                  >
+                    3. Asset Price & Fast/Slow SMA Overlay
+                  </button>
+                </div>
+                <span className="text-xs font-mono text-zinc-400">
+                  Ticker: <strong className="text-white">{btData.ticker}</strong>
+                </span>
+              </div>
+
+              {/* CHART 1: EQUITY CURVE */}
+              {btChartTab === "equity" && (
+                <div className="h-[380px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={btData.equityCurve}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                      <XAxis
+                        dataKey="date"
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      />
+                      <YAxis
+                        stroke="#71717a"
+                        domain={["auto", "auto"]}
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `$${v.toLocaleString()}`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#09090b",
+                          borderColor: "#27272a",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Legend
+                        wrapperStyle={{
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
                       <Line
                         type="monotone"
-                        dataKey="flatBSVol"
-                        name="Flat Black-Scholes Assumption"
-                        stroke="#52525b"
-                        strokeWidth={1.5}
+                        dataKey="strategyEquity"
+                        name={`SMA (${fastWindow}/${slowWindow}) Strategy ($)`}
+                        stroke="#10b981"
+                        strokeWidth={2.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="buyHoldEquity"
+                        name={`Buy & Hold ${btData.ticker} ($)`}
+                        stroke="#6366f1"
+                        strokeWidth={2}
                         strokeDasharray="4 4"
                         dot={false}
                       />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="mt-2 text-[11px] font-mono text-zinc-500 flex justify-between">
-                  <span>
-                    Left Wing (Low Strikes): Crash-protection Put Skew | Right
-                    Wing: OTM Call Convexity
-                  </span>
-                  <span className="text-amber-400">
-                    Short-dated (30d) smile exhibits steeper curvature than 180d
-                  </span>
+              )}
+
+              {/* CHART 2: UNDERWATER DRAWDOWN */}
+              {btChartTab === "drawdown" && (
+                <div className="h-[380px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={btData.equityCurve}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                      <XAxis
+                        dataKey="date"
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      />
+                      <YAxis
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#09090b",
+                          borderColor: "#27272a",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <ReferenceLine y={0} stroke="#52525b" />
+                      <Area
+                        type="monotone"
+                        dataKey="drawdownPct"
+                        name="Strategy Drawdown (%)"
+                        stroke="#f43f5e"
+                        fill="#f43f5e"
+                        fillOpacity={0.2}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
                 </div>
-              </div>
-            )}
+              )}
 
-            {activeTab === "greeks" && (
-              <div className="h-[340px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={localAnalytics.payoffCurve}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
-                    <XAxis
-                      dataKey="spot"
-                      stroke="#71717a"
-                      tick={{ fontSize: 11, fontFamily: "monospace" }}
-                      tickFormatter={(v) => `$${v}`}
-                    />
-                    <YAxis
-                      yAxisId="left"
-                      stroke="#10b981"
-                      tick={{ fontSize: 11, fontFamily: "monospace" }}
-                    />
-                    <YAxis
-                      yAxisId="right"
-                      orientation="right"
-                      stroke="#f59e0b"
-                      tick={{ fontSize: 11, fontFamily: "monospace" }}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#09090b",
-                        borderColor: "#27272a",
-                        fontFamily: "monospace",
-                        fontSize: "12px",
-                      }}
-                    />
-                    <ReferenceLine
-                      yAxisId="left"
-                      x={strikePrice}
-                      stroke="#52525b"
-                      strokeDasharray="4 4"
-                    />
-                    <Line
-                      yAxisId="left"
-                      type="monotone"
-                      dataKey="delta"
-                      name="Delta (Δ)"
-                      stroke="#10b981"
-                      strokeWidth={2.5}
-                      dot={false}
-                    />
-                    <Line
-                      yAxisId="right"
-                      type="monotone"
-                      dataKey="gamma"
-                      name="Gamma (Γ)"
-                      stroke="#f59e0b"
-                      strokeWidth={2}
-                      dot={false}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </div>
-
-          {uiMode === "pro" && (
-            <div className="bg-[#111114] border border-zinc-800 rounded p-4">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-                  <Layers className="w-3.5 h-3.5 text-amber-500" />
-                  Spot × Volatility Scenario P&L Matrix (Theo Value / Net Change)
-                </span>
-                <span className="text-[11px] font-mono text-zinc-500">
-                  Base Premium: ${active.blackScholesPrice.toFixed(2)}
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs font-mono border-collapse">
-                  <thead>
-                    <tr className="border-b border-zinc-800 text-zinc-400">
-                      <th className="py-2 px-3 text-left">Vol \ Spot Shock</th>
-                      {["-10%", "-5%", "0% (Spot)", "+5%", "+10%"].map((h) => (
-                        <th key={h} className="py-2 px-3 text-right">
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/60">
-                    {scenarioMatrix.map((row) => (
-                      <tr key={row.volLabel} className="hover:bg-zinc-900/40">
-                        <td className="py-2.5 px-3 text-zinc-300 font-semibold">
-                          {row.volLabel}
-                        </td>
-                        {row.cells.map((cell, i) => (
-                          <td
-                            key={i}
-                            className="py-2.5 px-3 text-right tabular-nums"
-                          >
-                            <span className="text-zinc-200">
-                              ${cell.theo.toFixed(2)}
-                            </span>{" "}
-                            <span
-                              className={
-                                cell.pnl >= 0
-                                  ? "text-emerald-400"
-                                  : "text-rose-400"
-                              }
-                            >
-                              ({cell.pnl >= 0 ? "+" : ""}
-                              {cell.pnl.toFixed(2)})
-                            </span>
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              {/* CHART 3: SPOT + FAST/SLOW SMA OVERLAY */}
+              {btChartTab === "signals" && (
+                <div className="h-[380px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={btData.equityCurve}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                      <XAxis
+                        dataKey="date"
+                        stroke="#71717a"
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                      />
+                      <YAxis
+                        stroke="#71717a"
+                        domain={["auto", "auto"]}
+                        tick={{ fontSize: 11, fontFamily: "monospace" }}
+                        tickFormatter={(v) => `$${v}`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#09090b",
+                          borderColor: "#27272a",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Legend
+                        wrapperStyle={{
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="spot"
+                        name={`${btData.ticker} Close Price`}
+                        stroke="#a1a1aa"
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="fastSma"
+                        name={`Fast SMA (${fastWindow}d)`}
+                        stroke="#10b981"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="slowSma"
+                        name={`Slow SMA (${slowWindow}d)`}
+                        stroke="#f59e0b"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
-          )}
-        </section>
-      </main>
+          </section>
+        </main>
+      )}
     </div>
   );
 }
