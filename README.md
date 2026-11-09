@@ -34,6 +34,18 @@ QuantDesk is a 3-tier quantitative finance workstation that models how trading d
 | **2. Service Gateway** | C#, ASP.NET Core Web API, `HttpClient` | `localhost:5000` | Strongly-typed DTO validation, CORS enforcement, header authentication, and routing |
 | **3. Trader Workstation** | React, Vite, Tailwind CSS, Recharts, Canvas | `localhost:5173` | Interactive parameter controls, stochastic path rendering, and P&L risk matrices |
 
+
+## Roadmap & verification status
+
+| Phase | Focus | Status |
+|---|---|---|
+| Phase 1 | Core Black-Scholes + Monte Carlo pricing engine, C# gateway, and dual-mode React workstation | ✅ Completed |
+| Phase 2 | Live market data integration (`yfinance`) for real-time spot prices and 1Y realized volatility | ✅ Completed |
+| Phase 3 | Implied Volatility solver (Newton-Raphson root finder) and Multi-Tenor Volatility Smile surface | ✅ Completed |
+| Phase 4 | American option pricing via Cox-Ross-Rubinstein (CRR) Binomial Trees & Early Exercise Premium | ✅ Completed |
+| Phase 5 | Automated `pytest` verification suite (Put-Call Parity, IV round-trip, CRR bounds) & GitHub CI | ✅ Completed |
+
+
 ## Run locally
 
 Requires **Python 3.11+**, **.NET 8.0+ SDK**, and **Node.js 20+**.
